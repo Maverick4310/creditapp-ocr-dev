@@ -25,7 +25,8 @@ Return ONLY a single JSON object, no markdown, no backticks, no preamble. Use th
 }
 
 Rules:
-- federalTaxId and ssn: digits only, strip dashes/spaces.
+- federalTaxId: digits only, strip dashes/spaces.
+- ssn: exactly 9 digits, with dashes/spaces stripped. Transcribe each digit exactly as printed — never add, drop, pad, or repeat a digit. If you cannot read exactly 9 digits with confidence, return "" for that guarantor's ssn and add a low_confidence flag noting the SSN could not be read reliably.
 - birthdate: YYYY-MM-DD or "".
 - cost: numeric string, no currency symbols or commas.
 - guarantors are individuals (people). corpGuarantors are corporate guarantor entities. contacts are non-guarantor buyer points of contact (no SSN/ownership).
