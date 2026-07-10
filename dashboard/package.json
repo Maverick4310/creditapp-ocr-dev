@@ -1,0 +1,18 @@
+{
+  "name": "navitas-ocr-service",
+  "version": "1.0.0",
+  "description": "Dedicated Render proxy: receives credit-app / invoice / email from the Navitas LWC, calls Claude for structured extraction, returns prefill JSON.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.1",
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}
