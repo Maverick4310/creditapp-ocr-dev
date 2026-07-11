@@ -19,6 +19,27 @@
 // OWNERS lands in guarantors or corpGuarantors, and a missing SSN is never a
 // reason to omit a party. The "no personal guarantor on file" signal is now
 // carried by a flag, not by an empty array.
+//
+// Jul 2026 — VENDOR HEADER FIX (Trouts House LLC / Emerald Transportation).
+// The credit app was Emerald's own branded form, so the seller was in the
+// letterhead — name, phone, fax, address and website all legible. The prior
+// vendorHint rule pointed only at the invoice and at "a referring dealer" on
+// the application, which reads as a labeled field; with no invoice and no
+// email the model flagged the vendor as unknown while its name sat in the
+// header. The VENDOR / SELLER IDENTIFICATION block below makes non-lender
+// letterhead an explicit, ordered source, while ruling out Navitas branding
+// (that's the lender) and the applicant itself.
+//
+// Jul 2026 — TERM FIELD ADDED (TNT's Tacos N' Tortas).
+// The schema had no "term" field, so a requested 36-month term was read but
+// had nowhere to land — it ended up narrated inside dealStory and was dropped
+// on the floor by the mapper. "term" is now a first-class top-level field,
+// matching the key _applyPrefill already reads on the LW prefill path. The
+// model reports the term EXACTLY as requested; snapping to an offered term is
+// the wizard's job, not the extractor's, so Credit can see the delta.
+// Same pass: the lender exclusion is tightened, because the Credit Express
+// form's own "Vendor Name" field said "Navitas Credit Corp." and the model
+// passed the lender through as the seller.
 
 export const SCHEMA_PROMPT = `You extract structured data from equipment-financing credit documents for a lender's intake form. You will receive up to three inputs: a CREDIT APPLICATION (authoritative for buyer identity and guarantors), a VENDOR INVOICE (authoritative for equipment description, cost, and the vendor/seller), and an EMAIL BODY (fills gaps and supplies deal context/narrative).
 
@@ -31,6 +52,7 @@ Return ONLY a single JSON object, no markdown, no backticks, no preamble. Use th
   "contacts": [ { "firstName": "", "lastName": "", "email": "", "phone": "" } ],
   "assets": [ { "description": "", "cost": "", "assetType": "", "street": "", "city": "", "state": "", "zip": "" } ],
   "vendorHint": { "name": "", "vendorId": "", "dba": "" },
+  "term": "",
   "dealStory": "",
   "flags": [ { "field": "", "issue": "conflict|low_confidence|missing", "note": "" } ]
 }
@@ -50,7 +72,22 @@ OWNER / GUARANTOR ROUTING (follow exactly):
 - "contacts" is ONLY for non-guarantor buyer points of contact — someone with no ownership stake and no guarantor role. A person listed under BUSINESS OWNERS never goes here.
 - If, after routing, "guarantors" is empty (no natural-person guarantor on the application), add a "missing" flag on field "guarantors" noting that no individual guarantor was listed and naming who was listed in their place. Do NOT express this by leaving "corpGuarantors" empty.
 
-- vendorHint: any vendor/dealer/seller name tied to the deal — usually the invoice's remit/"from" party, but also check the application for a referring dealer.
+VENDOR / SELLER IDENTIFICATION (follow exactly):
+- The vendor/dealer/seller is the party SELLING the equipment. It is never the applicant/buyer, and never the lender.
+- The CREDIT APPLICATION itself is a vendor source, not just the invoice. A credit application comes in two forms and you must tell them apart by the letterhead, logo, header, and footer:
+  - LENDER FORM: branded by Navitas Credit Corp (or its parent, United Community Bank). This branding identifies the LENDER. Ignore it — it is never the vendor. On these forms, look instead for a labeled vendor/dealer/supplier section or a referring-dealer field.
+  - THIRD-PARTY FORM: branded by any other company — a name, logo, phone/fax, address, or website in the header or footer that is neither Navitas nor the applicant. On a non-Navitas application, that branding IS the equipment vendor/seller: the dealer supplied its own credit app to the buyer. Extract it into vendorHint.name.
+- Resolve vendorHint.name from the first available source, in this order:
+  1. The invoice's remit-to / "from" / seller party.
+  2. A labeled vendor / dealer / supplier / seller section on the application.
+  3. The letterhead or footer branding of a non-Navitas, non-applicant credit application.
+  4. A dealer or salesperson identified in the email body or signature.
+- vendorId: only if an actual vendor, dealer, or account number is printed for that party. Never derive one from a phone number, tax ID, or address.
+- dba: a trade name for the vendor, if one is shown. Otherwise "".
+- The lender exclusion holds even when a labeled vendor field NAMES the lender. On Navitas's own Credit Express form the "Vendor Name" field is sometimes filled in with "Navitas Credit Corp." — that is the submitting lender, not the equipment seller. In that case return vendorHint.name as "" and add a "missing" flag noting that the vendor field named the lender and no equipment seller was identified. Never pass the lender through as the vendor.
+- Only flag vendorHint as "missing" when all four sources above are genuinely absent. The lack of an invoice or email alone is NOT sufficient grounds — check the application's branding first.
+
+- term: the requested lease/financing term, as a whole number of MONTHS, digits only ("36", not "36 months" or "3 years"). Convert years to months if the document states years. Read it from the application's term field, the invoice, or the email — a term stated only in the email or narrative still belongs here, NOT just in dealStory. If the term is absent, blank, or stated as "TBD"/"open", return "" and add a "missing" flag on field "term". Do not round, snap, or normalize the number to a "standard" term — report exactly what was requested and let the intake form reconcile it.
 - birthdate: YYYY-MM-DD or "".
 - dealStory: 1-3 sentence plain summary of the narrative/context (the story behind the request), drawn mainly from the email. "" if none.
 - flags: when two sources disagree on the same field, add a "conflict" flag naming the field and both values. Add "low_confidence" for anything you had to guess. Add "missing" only for important fields a credit reviewer would expect (buyer name, at least one guarantor OR corporate guarantor, at least one asset).
