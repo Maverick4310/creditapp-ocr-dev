@@ -88,13 +88,16 @@ function fileBlock(file) {
 }
 
 // ── /ocr ──────────────────────────────────────────────────────────────────
-// Body: { creditApp?: {media_type,data}, invoice?: {media_type,data}, emailText?: string }
+// Body: { creditApp?: {media_type,data}, invoice?: {media_type,data}, emailText?: string,
+//         instructions?: string }
+//   emailText    — evidence. Feeds gap-filling and dealStory.
+//   instructions — rep directives (Jul 2026). Override document values; see prompt.js.
 // 200:  { ok:true, data:{...extraction...} }
 // 422:  { ok:false, error, raw }   (model replied but JSON didn't parse)
 // 4xx/5xx on bad input or upstream failure.
 app.post("/ocr", checkToken, async (req, res) => {
   try {
-    const { creditApp, invoice, emailText } = req.body || {};
+    const { creditApp, invoice, emailText, instructions } = req.body || {};
 
     if (!creditApp && !invoice && !(emailText && emailText.trim())) {
       return res
@@ -115,6 +118,21 @@ app.post("/ocr", checkToken, async (req, res) => {
     if (inv) {
       content.push(inv);
       content.push({ type: "text", text: "^ The document above is the VENDOR INVOICE." });
+    }
+
+    // Rep instructions (Jul 2026) — a directive channel, deliberately separate
+    // from emailText. The email is EVIDENCE and feeds dealStory; these are
+    // corrections from the Navitas rep. Pushed as its own labeled block, and
+    // pushed BEFORE the schema prompt on purpose: this is rep-authored free
+    // text, so the extraction rules must come after it and have the final say
+    // on what may and may not be overridden.
+    if (instructions && instructions.trim()) {
+      content.push({
+        type: "text",
+        text:
+          `REP INSTRUCTIONS (written by the Navitas rep submitting this deal — ` +
+          `directives, not document evidence):\n"""\n${instructions.trim()}\n"""`,
+      });
     }
 
     let instruction = SCHEMA_PROMPT;
