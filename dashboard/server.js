@@ -216,9 +216,69 @@ app.post("/ocr", checkToken, async (req, res) => {
 // Text-only. No attachments, no applicant PII: aggregate sales figures plus
 // seller company names.
 //
+// OUTPUT SHAPE — FORCED TOOL USE (Jul 2026):
+//   /ocr asks for raw JSON and defensively strips code fences, which is fine for
+//   a rigid extraction schema. A NARRATIVE task is different: the model wants to
+//   frame its answer ("Here's the analysis:"), and that preamble broke JSON.parse.
+//   Prefilling the assistant turn with "{" would solve it, but Sonnet 5 rejects
+//   assistant prefill outright. So instead the response schema is declared as a
+//   TOOL and tool_choice forces the call. The API then returns a validated object
+//   on the tool_use block's `input` — there is no text to parse, no fence to
+//   strip, and malformed output stops being a possible failure mode.
+//
 // 200:  { ok:true, data:{ headline, summaryText, insights:[...] } }
-// 422:  { ok:false, error, raw }   (model replied but JSON didn't parse)
+// 422:  { ok:false, error }   (model failed to produce the structured call)
 // 4xx/5xx on bad input or upstream failure.
+
+// The analysis contract, expressed as a schema. Mirrors the OUTPUT block in
+// insightPrompt.js — if one changes, change both.
+const ANALYSIS_TOOL = {
+  name: "emit_analysis",
+  description:
+    "Emit the dashboard trend analysis. This is the only way to respond.",
+  input_schema: {
+    type: "object",
+    properties: {
+      headline: {
+        type: "string",
+        description: "One-line verdict, under 90 characters.",
+      },
+      summaryText: {
+        type: "string",
+        description:
+          "2-3 sentences: the year-over-year trend and what the monthly shape shows.",
+      },
+      insights: {
+        type: "array",
+        minItems: 3,
+        maxItems: 5,
+        description: "Prioritized findings, most important first.",
+        items: {
+          type: "object",
+          properties: {
+            title: { type: "string", description: "Under 50 characters." },
+            detail: {
+              type: "string",
+              description:
+                "1-2 sentences. Specific. Name the sellers. Say what to do.",
+            },
+            severity: {
+              type: "string",
+              enum: ["critical", "watch", "info", "positive"],
+            },
+            category: {
+              type: "string",
+              enum: ["pipeline", "sellers", "goal", "activity", "trend"],
+            },
+          },
+          required: ["title", "detail", "severity", "category"],
+        },
+      },
+    },
+    required: ["headline", "summaryText", "insights"],
+  },
+};
+
 app.post("/insights", checkToken, async (req, res) => {
   try {
     const payload = req.body || {};
@@ -242,55 +302,42 @@ app.post("/insights", checkToken, async (req, res) => {
     const message = await anthropic.messages.create({
       model: MODEL,
       max_tokens: INSIGHT_MAX_TOKENS,
-      messages: [
-        { role: "user", content },
-        // ASSISTANT PREFILL (Jul 2026 — fixes intermittent 422s).
-        // Seeding the assistant turn with an open brace removes the model's
-        // ability to emit a preamble ("Here's the analysis:") or a closing note
-        // before/after the JSON — the completion starts INSIDE the object. The
-        // prompt asks for raw JSON; this makes it structurally impossible to do
-        // otherwise. /ocr does not need this because a rigid extraction schema
-        // leaves no room for conversational framing; a narrative task does.
-        // NOTE: the response therefore OMITS the leading "{" — it is re-attached
-        // below before parsing.
-        { role: "assistant", content: "{" },
-      ],
+      messages: [{ role: "user", content }],
+      tools: [ANALYSIS_TOOL],
+      // Forces the tool call — the model cannot answer in prose.
+      tool_choice: { type: "tool", name: "emit_analysis" },
     });
 
-    // Same hardening as /ocr: concatenate text blocks, strip stray fences, parse.
-    // Duplicated on purpose — see the header note. Do NOT factor these together
-    // as part of an insights change.
-    let text = (message.content || [])
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("\n")
-      .replace(/```json|```/g, "")
-      .trim();
-
-    // Re-attach the prefilled brace the model was never asked to repeat.
-    text = "{" + text;
-
-    // Belt and braces: if anything still trails the object (a stray sentence,
-    // a truncated token), slice to the outermost balanced braces before parsing.
-    const first = text.indexOf("{");
-    const last = text.lastIndexOf("}");
-    if (first >= 0 && last > first) {
-      text = text.slice(first, last + 1);
+    // Truncation looks IDENTICAL to a malformed response downstream — the tool
+    // input is cut off and never lands. Call it out separately so a max_tokens
+    // problem doesn't get chased as a prompt problem.
+    if (message.stop_reason === "max_tokens") {
+      console.error(
+        `Insights hit max_tokens (${INSIGHT_MAX_TOKENS}) — response truncated. ` +
+          `Raise INSIGHT_MAX_TOKENS.`
+      );
+      return res
+        .status(422)
+        .json({ ok: false, error: "The analysis was cut short. Please retry." });
     }
 
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch (parseErr) {
-      console.error("Insights parse failure. Raw model text:\n", text);
-      return res.status(422).json({
-        ok: false,
-        error: "Model response was not valid JSON.",
-        raw: text,
-      });
+    // The validated object arrives on the tool_use block's `input`. No text
+    // parsing, no fence stripping.
+    const toolUse = (message.content || []).find((b) => b.type === "tool_use");
+
+    if (!toolUse || !toolUse.input) {
+      console.error(
+        "Insights: no tool_use block returned. stop_reason=",
+        message.stop_reason,
+        "content=",
+        JSON.stringify(message.content)
+      );
+      return res
+        .status(422)
+        .json({ ok: false, error: "The analysis came back empty. Please retry." });
     }
 
-    return res.json({ ok: true, data });
+    return res.json({ ok: true, data: toolUse.input });
   } catch (err) {
     console.error("Insights error:", err?.message || err);
     return res.status(500).json({ ok: false, error: "Analysis failed. Please retry." });
