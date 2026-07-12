@@ -6,7 +6,7 @@
 // The Anthropic API key lives ONLY in this service's environment. It never
 // reaches the browser and never touches Salesforce. The browser is trusted
 // only by Origin (CORS allowlist) — see README for what that does and doesn't
-// protect. No applicant data is persisted here; documents are held in memory
+// protect. No applicant data is persisted here; documents are held in memory 
 // for the duration of the request and then discarded.
 //
 // CHANGE (Jul 2026) — DASHBOARD INSIGHTS ROUTE.
