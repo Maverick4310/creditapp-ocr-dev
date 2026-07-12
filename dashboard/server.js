@@ -6,7 +6,7 @@
 // The Anthropic API key lives ONLY in this service's environment. It never
 // reaches the browser and never touches Salesforce. The browser is trusted
 // only by Origin (CORS allowlist) — see README for what that does and doesn't
-// protect. No applicant data is persisted here; documents are held in memory 
+// protect. No applicant data is persisted here; documents are held in memory
 // for the duration of the request and then discarded.
 //
 // CHANGE (Jul 2026) — DASHBOARD INSIGHTS ROUTE.
@@ -242,23 +242,47 @@ app.post("/insights", checkToken, async (req, res) => {
     const message = await anthropic.messages.create({
       model: MODEL,
       max_tokens: INSIGHT_MAX_TOKENS,
-      messages: [{ role: "user", content }],
+      messages: [
+        { role: "user", content },
+        // ASSISTANT PREFILL (Jul 2026 — fixes intermittent 422s).
+        // Seeding the assistant turn with an open brace removes the model's
+        // ability to emit a preamble ("Here's the analysis:") or a closing note
+        // before/after the JSON — the completion starts INSIDE the object. The
+        // prompt asks for raw JSON; this makes it structurally impossible to do
+        // otherwise. /ocr does not need this because a rigid extraction schema
+        // leaves no room for conversational framing; a narrative task does.
+        // NOTE: the response therefore OMITS the leading "{" — it is re-attached
+        // below before parsing.
+        { role: "assistant", content: "{" },
+      ],
     });
 
     // Same hardening as /ocr: concatenate text blocks, strip stray fences, parse.
     // Duplicated on purpose — see the header note. Do NOT factor these together
     // as part of an insights change.
-    const text = (message.content || [])
+    let text = (message.content || [])
       .filter((b) => b.type === "text")
       .map((b) => b.text)
       .join("\n")
       .replace(/```json|```/g, "")
       .trim();
 
+    // Re-attach the prefilled brace the model was never asked to repeat.
+    text = "{" + text;
+
+    // Belt and braces: if anything still trails the object (a stray sentence,
+    // a truncated token), slice to the outermost balanced braces before parsing.
+    const first = text.indexOf("{");
+    const last = text.lastIndexOf("}");
+    if (first >= 0 && last > first) {
+      text = text.slice(first, last + 1);
+    }
+
     let data;
     try {
       data = JSON.parse(text);
     } catch (parseErr) {
+      console.error("Insights parse failure. Raw model text:\n", text);
       return res.status(422).json({
         ok: false,
         error: "Model response was not valid JSON.",
