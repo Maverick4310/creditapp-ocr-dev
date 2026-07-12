@@ -8,17 +8,41 @@
 // only by Origin (CORS allowlist) — see README for what that does and doesn't
 // protect. No applicant data is persisted here; documents are held in memory
 // for the duration of the request and then discarded.
+//
+// CHANGE (Jul 2026) — DASHBOARD INSIGHTS ROUTE.
+// Added POST /insights. Same service, same deploy, same API key, same
+// SHARED_TOKEN and checkToken gate — a second route is strictly cheaper than a
+// second Render app, and nothing about this workload needs isolation from /ocr.
+//
+// This change is deliberately ADDITIVE: not one line inside the /ocr handler is
+// touched. There is a small amount of duplicated fence-strip/parse logic between
+// the two routes as a result, and that is the intended trade — /ocr runs in
+// production against real credit applications, and a working extraction path
+// should not acquire a diff because an unrelated feature shipped. If the two
+// parsers ever need to be factored together, do it THEN, as its own change with
+// its own regression pass.
+//
+// /insights is the inverse of /ocr: instead of reading documents to produce
+// numbers, it is handed pre-computed numbers (from DashboardInsightController,
+// which reuses MyDashboardController's existing aggregation) and produces
+// narrative. No files, no applicant PII — the payload is aggregate sales metrics
+// and seller company names. The prompt lives in insightPrompt.js, mirroring how
+// prompt.js is kept out of the wiring.
 
 import express from "express";
 import cors from "cors";
 import Anthropic from "@anthropic-ai/sdk";
 import { SCHEMA_PROMPT } from "./prompt.js";
+import { INSIGHT_PROMPT } from "./insightPrompt.js";   // Jul 2026
 
 // ── Config (all from environment) ─────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 const MODEL = process.env.MODEL || "claude-sonnet-5"; // flip to claude-haiku-4-5-20251001 for cheap testing
 const MAX_TOKENS = parseInt(process.env.MAX_TOKENS || "4096", 10);
+// Jul 2026 — insights are a short narrative, not a full extraction schema.
+// Separate ceiling so /insights doesn't pay for /ocr's headroom.
+const INSIGHT_MAX_TOKENS = parseInt(process.env.INSIGHT_MAX_TOKENS || "1500", 10);
 const SHARED_TOKEN = process.env.SHARED_TOKEN || ""; // optional soft check (see README)
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
@@ -87,7 +111,10 @@ function fileBlock(file) {
   return null; // unsupported type — silently skipped
 }
 
-// ── /ocr ──────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// /ocr — UNCHANGED from the production version. Do not edit this handler as
+//        part of an insights change.
+// ══════════════════════════════════════════════════════════════════════════
 // Body: { creditApp?: {media_type,data}, invoice?: {media_type,data}, emailText?: string,
 //         instructions?: string }
 //   emailText    — evidence. Feeds gap-filling and dealStory.
@@ -176,10 +203,81 @@ app.post("/ocr", checkToken, async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════════════════
+// /insights — Jul 2026. Dashboard trend/pattern analysis. Purely additive.
+// ══════════════════════════════════════════════════════════════════════════
+// Body: { metrics: {...}, series: {...}, sellers: {...} }
+//   Everything is PRE-COMPUTED in Apex from the existing MyDashboardController
+//   aggregation. This route does no math, and insightPrompt.js forbids the model
+//   from doing any either — if it derived its own figures, the panel would print
+//   a number that contradicts the KPI tile directly above it, and the dashboard
+//   would lose credibility permanently.
+//
+// Text-only. No attachments, no applicant PII: aggregate sales figures plus
+// seller company names.
+//
+// 200:  { ok:true, data:{ headline, summaryText, insights:[...] } }
+// 422:  { ok:false, error, raw }   (model replied but JSON didn't parse)
+// 4xx/5xx on bad input or upstream failure.
+app.post("/insights", checkToken, async (req, res) => {
+  try {
+    const payload = req.body || {};
+
+    if (!payload.metrics) {
+      return res.status(400).json({ ok: false, error: "No metrics provided." });
+    }
+
+    // Numbers first, rules last — same ordering logic as /ocr, where the schema
+    // prompt is pushed after the evidence so it has the final say.
+    const content = [
+      {
+        type: "text",
+        text:
+          `DASHBOARD METRICS (pre-computed — do not recalculate):\n"""\n` +
+          `${JSON.stringify(payload, null, 2)}\n"""`,
+      },
+      { type: "text", text: INSIGHT_PROMPT },
+    ];
+
+    const message = await anthropic.messages.create({
+      model: MODEL,
+      max_tokens: INSIGHT_MAX_TOKENS,
+      messages: [{ role: "user", content }],
+    });
+
+    // Same hardening as /ocr: concatenate text blocks, strip stray fences, parse.
+    // Duplicated on purpose — see the header note. Do NOT factor these together
+    // as part of an insights change.
+    const text = (message.content || [])
+      .filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join("\n")
+      .replace(/```json|```/g, "")
+      .trim();
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (parseErr) {
+      return res.status(422).json({
+        ok: false,
+        error: "Model response was not valid JSON.",
+        raw: text,
+      });
+    }
+
+    return res.json({ ok: true, data });
+  } catch (err) {
+    console.error("Insights error:", err?.message || err);
+    return res.status(500).json({ ok: false, error: "Analysis failed. Please retry." });
+  }
+});
+
 if (!SHARED_TOKEN) {
   console.warn(
-    "WARNING: SHARED_TOKEN is not set — the /ocr endpoint is unauthenticated. " +
-    "Set it and have Apex send X-Navitas-Token before exposing this publicly."
+    "WARNING: SHARED_TOKEN is not set — the /ocr and /insights endpoints are " +
+    "unauthenticated. Set it and have Apex send X-Navitas-Token before exposing " +
+    "this publicly."
   );
 }
 
