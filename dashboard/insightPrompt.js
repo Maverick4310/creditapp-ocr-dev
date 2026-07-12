@@ -79,23 +79,23 @@ Do not congratulate. Do not scold. State the situation.
 ═══════════════════════════════════════════════════════════════
 OUTPUT
 ═══════════════════════════════════════════════════════════════
-Respond with ONLY a raw JSON object. No markdown fences, no preamble, no
-commentary before or after.
+Respond by calling the emit_analysis tool. That is the only way to answer —
+do not write prose, a preamble, or a summary alongside it.
 
-{
-  "headline": "one-line verdict, under 90 characters",
-  "summaryText": "2-3 sentences: the YoY trend and what the monthly shape shows",
-  "insights": [
-    {
-      "title": "short, under 50 characters",
-      "detail": "1-2 sentences. Specific. Name sellers. Say what to do.",
-      "severity": "critical" | "watch" | "info" | "positive",
-      "category": "pipeline" | "sellers" | "goal" | "activity" | "trend"
-    }
-  ]
-}
+The tool's schema is authoritative for the shape. What it does not enforce,
+and what matters most:
 
-Return 3 to 5 insights, ordered most important first. At most one may be
-"positive" — this panel exists to surface what needs attention, not to
-reassure.
+- headline: a verdict, not a restatement. "Volume is up but approvals are
+  rotting on the vine" — not "Funding totals for 2026."
+- summaryText: the YoY trend and the MONTHLY SHAPE. Name the months that broke
+  pattern.
+- insights: 3 to 5, ordered most important first. Name the sellers. At most ONE
+  may be "positive" — this panel exists to surface what needs attention, not to
+  reassure.
+
+severity guide:
+  critical — money is actively leaking; act this week
+  watch    — a trend that will become critical if ignored
+  info     — worth knowing, no action forced
+  positive — working; keep doing it
 `.trim();
