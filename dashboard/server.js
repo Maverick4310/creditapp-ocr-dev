@@ -278,8 +278,20 @@ const EXTRACTION_TOOL = {
           name: { type: "string" },
           vendorId: { type: "string" },
           dba: { type: "string" },
+          // 2026-07-13 — the vendor-side sender's address. Salesforce resolves the
+          // seller account from this before falling back to the company name, which
+          // is what collides ("four Konica Minoltas"). "" if the only address
+          // available belongs to the buyer or the lender.
+          email: {
+            type: "string",
+            description:
+              "Email address of the VENDOR-SIDE person (the salesperson who sent the " +
+              "app, or a dealer contact on the invoice/signature). \"\" if the only " +
+              "address found belongs to the buyer, the lender, or a Navitas employee.",
+          },
+          contactName: { type: "string", description: "That person's name, or \"\"." },
         },
-        required: ["name", "vendorId", "dba"],
+        required: ["name", "vendorId", "dba", "email", "contactName"],
       },
       term: {
         type: "string",
