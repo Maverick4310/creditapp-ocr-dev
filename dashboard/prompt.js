@@ -41,6 +41,27 @@
 // form's own "Vendor Name" field said "Navitas Credit Corp." and the model
 // passed the lender through as the seller.
 //
+// 2026-07-13 — LOW CONFIDENCE: GUESS, DON'T WITHHOLD (pilot demo).
+// A handwritten app's federal tax ID read as roughly "39-27-27" — legible enough
+// to have a best reading, not legible enough to be certain. The model returned ""
+// plus a low_confidence flag, and the rep saw an empty field and a warning. Both
+// David and Cristian landed on the same conclusion live: return the best reading
+// anyway and let the rep correct it. A rep comparing a proposed value against the
+// document in front of them is doing a 2-second check; a rep facing a blank field
+// is doing full manual entry, which is the thing this feature exists to remove.
+// The block below inverts the default: extract a best reading, flag it, say what
+// you saw and what else it could be.
+//
+// SSN IS DEDUCTIBLY EXCLUDED FROM THIS, and the exclusion is load-bearing.
+// Every other guessed value is self-policing — a rep reading the review card
+// against the document will catch a wrong street number or a wrong cost. A
+// guessed SSN is not: nine wrong digits look identical to nine right ones, the
+// LWC's _validateSsns only checks the COUNT, and the value flows to LeaseWorks
+// and pulls credit on a real person who is not the guarantor. There is no
+// downstream check that catches it and no signal that tells the rep to look. So
+// the SSN rule stays strict — transcribe or blank, never infer — and the cost of
+// that is one field the rep sometimes types by hand.
+//
 // 2026-07-13 — EMAIL BODY HANDLING (pilot demo).
 // Two live extractions came back as "Model response was not valid JSON." Both
 // email bodies contained hyperlinks; the second also had a pasted To/From/
@@ -113,6 +134,14 @@ VENDOR / SELLER IDENTIFICATION (follow exactly):
 - The lender exclusion holds even when a labeled vendor field NAMES the lender. On Navitas's own Credit Express form the "Vendor Name" field is sometimes filled in with "Navitas Credit Corp." — that is the submitting lender, not the equipment seller. In that case return vendorHint.name as "" and add a "missing" flag noting that the vendor field named the lender and no equipment seller was identified. Never pass the lender through as the vendor.
 - Only flag vendorHint as "missing" when all four sources above are genuinely absent. The lack of an invoice or email alone is NOT sufficient grounds — check the application's branding first.
 
+LOW CONFIDENCE — GUESS, DO NOT WITHHOLD (follow exactly):
+- Default rule: if a value is PRESENT on the document but hard to read, emit your BEST READING and add a low_confidence flag. Do not return "" for a value that is there. A blank field forces the rep to retype it from the same document you just looked at, which is worse than a proposed value they can correct in two seconds.
+- This applies to smudged print, poor scans, cursive, overwriting, faint ink, cut-off edges, ambiguous digits (0/O, 1/7, 2/Z, 5/S, 6/8, 9/4) — anything where a careful human would say "it's probably X".
+- The low_confidence flag must be USEFUL. Name the field, say what the characters look like as printed, and give the plausible alternative(s). Good: field "customer.federalTaxId", note "reads as 39-27-27xxx; third pair could be 20 or 29 — verify against the application." Useless: "could not read tax ID reliably."
+- "Never invent" and "best reading" are different things and you must not confuse them. A best reading requires MARKS ON THE PAGE that you are interpreting. If a field is absent, blank, crossed out, or simply not on the document, it is NOT low confidence — it is missing. Return "" and flag it "missing". Never manufacture a value from context, from a typical value, from another party's data, or from what would make the deal work.
+- SSN IS THE ONE EXCEPTION AND IT IS ABSOLUTE. Never guess, infer, complete, or pad an SSN digit. If you cannot read exactly 9 digits with confidence, return "" for that guarantor's ssn and raise a low_confidence flag describing what you could see. Rationale, so this rule is not "cleaned up" later: a guessed SSN of the right LENGTH is indistinguishable from a correct one to every check downstream of you — it reaches the lender's system and pulls a credit report on whoever actually owns those digits. Every other guessed field is checkable by a rep against the document; this one is not. A blank SSN costs a rep ten seconds of typing. A wrong one costs a stranger a credit inquiry.
+- A guessed value NEVER removes a party, an asset, or a row from the output, and never suppresses any other flag.
+
 EMAIL BODY HANDLING (an EMAIL BODY block may appear above this one):
 - That block is a raw email pasted by the rep, exactly as it arrived. Expect mail-client clutter around the content: routing headers, hyperlinks, tracking URLs, disclaimers, quoted reply chains, "Sent from my iPhone" footers, image placeholders. None of it is a problem. Read past it and extract what is there.
 - Routing headers (From, To, Cc, Sent, Date, Subject) are METADATA, not content. They never become a customer, a guarantor, or an asset. They are useful for exactly two things:
@@ -136,4 +165,4 @@ REP INSTRUCTIONS (a REP INSTRUCTIONS block may appear above this one):
 - birthdate: YYYY-MM-DD or "".
 - dealStory: 1-3 sentence plain summary of the narrative/context (the story behind the request), drawn mainly from the email. "" if none.
 - flags: when two sources disagree on the same field, add a "conflict" flag naming the field and both values. Add "low_confidence" for anything you had to guess. Add "missing" only for important fields a credit reviewer would expect (buyer name, at least one guarantor OR corporate guarantor, at least one asset).
-- Never invent SSNs, tax IDs, or dollar amounts. If not present, leave "".`;
+- Never INVENT an SSN, tax ID, or dollar amount — a value with no marks on the page behind it. If it is not on the document, leave "" and flag it "missing". This does not conflict with LOW CONFIDENCE above: reading illegible marks is not inventing, and inventing is not reading. Present-but-unclear -> best reading + low_confidence flag. Absent -> "" + missing flag. SSN is the exception to the first of those, and only the first: present-but-unclear still returns "" (see the SSN rule).`;
