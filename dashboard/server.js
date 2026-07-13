@@ -173,7 +173,13 @@ const EXTRACTION_TOOL = {
         properties: {
           name: { type: "string" },
           dba: { type: "string" },
-          federalTaxId: { type: "string", description: "Digits only." },
+          federalTaxId: {
+            type: "string",
+            description:
+              "Digits only. If present but hard to read, emit your best reading and " +
+              "raise a low_confidence flag — do NOT return \"\" for a value that is " +
+              "on the page. \"\" only when genuinely absent.",
+          },
           phone: { type: "string" },
           street: { type: "string" },
           city: { type: "string" },
@@ -195,7 +201,14 @@ const EXTRACTION_TOOL = {
           properties: {
             firstName: { type: "string" },
             lastName: { type: "string" },
-            ssn: { type: "string", description: "Exactly 9 digits, or \"\"." },
+            ssn: {
+              type: "string",
+              description:
+                "Exactly 9 digits transcribed as printed, or \"\". NEVER guess, pad, " +
+                "or complete a digit — unlike every other field, an SSN of the right " +
+                "length is unverifiable downstream and pulls credit on a real person. " +
+                "Unreadable -> \"\" plus a low_confidence flag. Never drop the guarantor.",
+            },
             email: { type: "string" },
             birthdate: { type: "string", description: "YYYY-MM-DD or \"\"." },
             streetNumber: { type: "string" },
