@@ -98,7 +98,7 @@ Respond by calling the emit_extraction tool. It is the only way to answer — do
   "corpGuarantors": [ { "name": "", "federalTaxId": "", "email": "", "phone": "", "street": "", "city": "", "state": "", "zip": "" } ],
   "contacts": [ { "firstName": "", "lastName": "", "email": "", "phone": "" } ],
   "assets": [ { "description": "", "cost": "", "assetType": "", "street": "", "city": "", "state": "", "zip": "" } ],
-  "vendorHint": { "name": "", "vendorId": "", "dba": "" },
+  "vendorHint": { "name": "", "vendorId": "", "dba": "", "email": "", "contactName": "" },
   "term": "",
   "dealStory": "",
   "flags": [ { "field": "", "issue": "conflict|low_confidence|missing", "note": "" } ]
@@ -129,6 +129,8 @@ VENDOR / SELLER IDENTIFICATION (follow exactly):
   2. A labeled vendor / dealer / supplier / seller section on the application.
   3. The letterhead or footer branding of a non-Navitas, non-applicant credit application.
   4. A dealer or salesperson identified in the email body or signature.
+- vendorHint.email: the email address of the VENDOR-SIDE person connected to this deal — the salesperson who sent the application, or a dealer contact printed on the invoice or in a signature block. This is the single most reliable pointer to the right seller account (company names collide constantly; addresses do not), so extract it whenever one exists. Take it from the email's FROM address when the sender is vendor-side, or from a signature block or a labeled dealer-contact field. Leave "" if the only address you can find belongs to the BUYER, to the lender, or to a Navitas employee — a wrong address here is worse than none, because it points confidently at the wrong company.
+- vendorHint.contactName: that person's name, if shown. Otherwise "".
 - vendorId: only if an actual vendor, dealer, or account number is printed for that party. Never derive one from a phone number, tax ID, or address.
 - dba: a trade name for the vendor, if one is shown. Otherwise "".
 - The lender exclusion holds even when a labeled vendor field NAMES the lender. On Navitas's own Credit Express form the "Vendor Name" field is sometimes filled in with "Navitas Credit Corp." — that is the submitting lender, not the equipment seller. In that case return vendorHint.name as "" and add a "missing" flag noting that the vendor field named the lender and no equipment seller was identified. Never pass the lender through as the vendor.
