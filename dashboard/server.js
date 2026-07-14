@@ -275,7 +275,20 @@ const EXTRACTION_TOOL = {
         type: "object",
         description: "The equipment SELLER. Never the applicant, never the lender.",
         properties: {
-          name: { type: "string" },
+          // 2026-07-14 — a branded third-party credit application (letterhead/logo that
+          // is neither Navitas nor the applicant) IS a vendor source. The model was
+          // reasoning to the right answer, writing it into a flag ("branded TRACKED
+          // LIFTS, treated as the vendor identity"), and then emitting "" — because the
+          // doubt was about the ROLE, not the characters, and the low-confidence rule
+          // only spoke about legibility. Salesforce searches on this name; a blank one
+          // searches for nothing.
+          name: {
+            type: "string",
+            description:
+              "Seller company name. If the application carries third-party branding, " +
+              "that branding IS the vendor — populate this from the letterhead. Express " +
+              "any doubt in a low_confidence flag, NEVER by leaving this empty.",
+          },
           vendorId: { type: "string" },
           dba: { type: "string" },
           // 2026-07-13 — the vendor-side sender's address. Salesforce resolves the
@@ -295,11 +308,16 @@ const EXTRACTION_TOOL = {
       },
       term: {
         type: "string",
-        description: "Requested term in whole MONTHS, digits only. \"\" if absent.",
+        description:
+          "Requested term in whole MONTHS, digits only. Empty string if absent — an " +
+          "EMPTY string, not a string containing quote characters (production has seen " +
+          "the literal value '\"\"' land here and reach the form as junk).",
       },
       dealStory: {
         type: "string",
-        description: "1-3 sentence plain summary of the narrative/context. \"\" if none.",
+        description:
+          "1-3 sentence plain summary of the narrative/context. Empty string if none — " +
+          "an EMPTY string, not a string containing quote characters.",
       },
       flags: {
         type: "array",
