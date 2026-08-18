@@ -71,6 +71,12 @@ const MAX_TOKENS = parseInt(process.env.MAX_TOKENS || "4096", 10);
 // Jul 2026 — insights are a short narrative, not a full extraction schema.
 // Separate ceiling so /insights doesn't pay for /ocr's headroom.
 const INSIGHT_MAX_TOKENS = parseInt(process.env.INSIGHT_MAX_TOKENS || "1500", 10);
+// 2026-08-18 — SSN VERIFICATION PASS. See the block above verifyGuarantorSsns().
+//   "always"  (default) — second focused read on every extraction with a credit app
+//   "onissue"           — only when pass 1 left an SSN blank or malformed
+//   "off"               — pass 1 only (pre-2026-08-18 behaviour)
+const SSN_VERIFY = (process.env.SSN_VERIFY || "always").toLowerCase();
+const SSN_VERIFY_MAX_TOKENS = parseInt(process.env.SSN_VERIFY_MAX_TOKENS || "1000", 10);
 const SHARED_TOKEN = process.env.SHARED_TOKEN || ""; // optional soft check (see README)
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
@@ -137,6 +143,206 @@ function fileBlock(file) {
     };
   }
   return null; // unsupported type — silently skipped
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// SSN VERIFICATION PASS  (2026-08-18 — HotWalls Studio Inc)
+// ══════════════════════════════════════════════════════════════════════════
+// The report was "SF did not pick up the PG socials." The document turned out to
+// be a CLEAN, TYPED PDF with both SSNs perfectly legible, and pass 1 got both
+// wrong in two different ways:
+//
+//   SSN 1 (097 96 2220) — transcribed CORRECTLY inside the flag note, then
+//     discarded, because the model described the field to itself as overwritten
+//     and ambiguous. It wasn't. The blank-if-unsure rule fired on a legibility
+//     problem that did not exist.
+//   SSN 2 (779 87 2414) — again correct in the flag note, but the FIELD received
+//     77987241: the last digit dropped. Eight digits, silently cleared downstream.
+//
+// The common thread is not the document. It is that a single nine-digit
+// transcription, performed as one field among forty inside a long extraction, is
+// not reliable enough on its own — and prompt.js's SSN rule was written on the
+// assumption that failures would look like illegible handwriting, so it defends
+// against unreadable input and not against a confident misread of readable input.
+//
+// So this is a SECOND, NARROW read: the credit application only, one question,
+// nothing else in scope. A focused single-task read of a nine-digit field is a
+// materially different task from the same field inside a forty-field schema, and
+// treating it as the authority is the point of running it at all.
+//
+// Reconciliation, and why it is shaped this way:
+//   • both reads agree on 9 digits → keep. Silent. The common case.
+//   • pass 1 blank or malformed, pass 2 clean 9 → ADOPT pass 2, flag low_confidence.
+//     This is the HotWalls case, and it is the whole reason the pass exists.
+//   • both clean 9 but DIFFERENT → blank + conflict flag carrying BOTH readings.
+//     Two independent reads disagreeing is exactly the situation where a machine
+//     must not pick, and the rep has the document in front of them.
+//   • pass 2 unusable → leave pass 1 untouched. A failed verification must never
+//     be worse than no verification.
+//
+// The rule prompt.js is protecting — never let a WRONG nine-digit SSN through,
+// because nothing downstream can catch it — is strengthened here, not relaxed:
+// adopted values have survived two reads, and disagreement now blanks a value
+// that pass 1 alone would have passed through unchallenged.
+//
+// Cost: one extra call carrying the credit application, on extractions that have
+// guarantors. Default is "always" rather than "onissue" deliberately — a
+// confidently wrong SSN from pass 1 raises no issue to trigger on, and that is
+// precisely the failure mode with no downstream check. Set SSN_VERIFY=onissue to
+// trade that coverage for spend.
+const SSN_VERIFY_TOOL = {
+  name: "emit_ssn_read",
+  description:
+    "Return the owner/principal names and Social Security Numbers exactly as printed on the credit application.",
+  input_schema: {
+    type: "object",
+    properties: {
+      owners: {
+        type: "array",
+        description:
+          "One entry per owner/principal listed on the application, in the order printed.",
+        items: {
+          type: "object",
+          properties: {
+            firstName: { type: "string" },
+            lastName: { type: "string" },
+            ssn: {
+              type: "string",
+              description:
+                "The SSN exactly as printed, digits only, dashes and spaces removed. " +
+                "Transcribe every digit — do not drop, add, pad or repeat one. " +
+                "If the field is genuinely blank on the page, or you cannot make out " +
+                "the digits at all, return an empty string.",
+            },
+          },
+          required: ["firstName", "lastName", "ssn"],
+        },
+      },
+    },
+    required: ["owners"],
+  },
+};
+
+const SSN_VERIFY_PROMPT =
+  `Read ONLY the Owner/Principal (guarantor) section of the credit application above.\n\n` +
+  `For each owner listed, return their first name, last name, and Social Security ` +
+  `Number exactly as printed on the page, digits only.\n\n` +
+  `This is a transcription task, not a judgement task. Do not evaluate whether the ` +
+  `number looks plausible, do not correct it, do not reformat it, and do not skip an ` +
+  `owner because something else about their row is incomplete. Read the digits left to ` +
+  `right and report exactly what is printed — the single most common error here is ` +
+  `dropping the final digit, so count them.\n\n` +
+  `Return "" for the SSN only if that field is actually empty on the page, or if the ` +
+  `digits are genuinely unreadable. Ignore every other field on the application.`;
+
+// digits-only helper — the one place the "what counts as an SSN" rule lives.
+function ssnDigits(v) {
+  return String(v == null ? "" : v).replace(/\D/g, "");
+}
+
+async function verifyGuarantorSsns(creditAppBlock, data) {
+  if (SSN_VERIFY === "off" || !creditAppBlock) return;
+  if (!data || !Array.isArray(data.guarantors) || data.guarantors.length === 0) return;
+
+  const anyProblem = data.guarantors.some((g) => ssnDigits(g && g.ssn).length !== 9);
+  if (SSN_VERIFY === "onissue" && !anyProblem) return;
+
+  let owners;
+  try {
+    const verify = await anthropic.messages.create({
+      model: MODEL,
+      max_tokens: SSN_VERIFY_MAX_TOKENS,
+      messages: [
+        {
+          role: "user",
+          content: [creditAppBlock, { type: "text", text: SSN_VERIFY_PROMPT }],
+        },
+      ],
+      tools: [SSN_VERIFY_TOOL],
+      tool_choice: { type: "tool", name: "emit_ssn_read" },
+    });
+
+    const block = (verify.content || []).find((b) => b.type === "tool_use");
+    owners = block && block.input && block.input.owners;
+    if (!Array.isArray(owners)) {
+      console.error("SSN verify: no usable owners array returned — leaving pass 1 as-is.");
+      return;
+    }
+  } catch (err) {
+    // Never fatal. A failed verification leaves the extraction exactly as pass 1
+    // produced it, which is the pre-2026-08-18 behaviour.
+    console.error("SSN verify call failed:", err?.message || err);
+    return;
+  }
+
+  data.flags = Array.isArray(data.flags) ? data.flags : [];
+
+  data.guarantors.forEach((g, i) => {
+    if (!g) return;
+
+    // Match on last name first — the verification pass reads the same section in
+    // the same order, but a name match survives a row being skipped in one pass
+    // and not the other. Index is the fallback.
+    const last = String(g.lastName || "").trim().toLowerCase();
+    const byName = owners.find(
+      (o) => o && String(o.lastName || "").trim().toLowerCase() === last && last !== ""
+    );
+    const match = byName || owners[i];
+    if (!match) return;
+
+    const d1 = ssnDigits(g.ssn);
+    const d2 = ssnDigits(match.ssn);
+
+    if (d1.length === 9 && d2.length === 9 && d1 === d2) {
+      g.ssn = d1;
+      return; // agreed. nothing to say.
+    }
+
+    if (d1.length === 9 && d2.length === 9 && d1 !== d2) {
+      console.warn(
+        `SSN verify: guarantors[${i}] two clean reads DISAGREE — clearing. ` +
+          `pass1 ends ${d1.slice(-4)}, pass2 ends ${d2.slice(-4)}.`
+      );
+      g.ssn = "";
+      data.flags.push({
+        field: `guarantors[${i}].ssn`,
+        issue: "conflict",
+        note:
+          `Two independent reads of this SSN disagree — one read it as ${d1}, ` +
+          `the other as ${d2}. Cleared: please enter it from the document.`,
+      });
+      return;
+    }
+
+    if (d2.length === 9) {
+      // Pass 1 was blank or the wrong length; pass 2 is clean. Adopt it, and say so.
+      console.warn(
+        `SSN verify: guarantors[${i}] recovered by second read ` +
+          `(pass 1 had ${d1.length} digits).`
+      );
+      g.ssn = d2;
+      data.flags.push({
+        field: `guarantors[${i}].ssn`,
+        issue: "low_confidence",
+        note:
+          d1.length === 0
+            ? `SSN recovered on a second read of the application: ${d2}. ` +
+              `The first pass could not confirm it — please check it against the document.`
+            : `First read returned ${d1.length} digits; a second read of the ` +
+              `application gives ${d2}. Please check it against the document.`,
+      });
+      return;
+    }
+
+    // Pass 2 gave nothing usable. Leave pass 1 alone — Apex and the LWC still
+    // apply their own 9-digit guard, so a malformed pass-1 value is cleared there.
+    if (d1.length > 0 && d1.length !== 9) {
+      console.warn(
+        `SSN verify: guarantors[${i}] malformed in pass 1 (${d1.length} digits) ` +
+          `and unconfirmed by pass 2.`
+      );
+    }
+  });
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -437,7 +643,13 @@ app.post("/ocr", checkToken, async (req, res) => {
         .json({ ok: false, error: "The documents could not be read cleanly. Please retry." });
     }
 
-    return res.json({ ok: true, data: toolUse.input });
+    // 2026-08-18 — second, focused read of the guarantor SSNs before the payload
+    // leaves the service, so both the LWC path and the email-intake path get it.
+    // Mutates in place; never throws; a failure leaves pass 1 untouched.
+    const data = toolUse.input;
+    await verifyGuarantorSsns(ca, data);
+
+    return res.json({ ok: true, data });
   } catch (err) {
     console.error("OCR error:", err?.message || err);
     // Don't leak internals to the browser.
