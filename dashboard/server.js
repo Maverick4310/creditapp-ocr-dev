@@ -57,6 +57,34 @@
 // final authority in the instruction text. Evidence first, rules last, exactly
 // as the documents and the rep-instructions block are already ordered.
 
+// CHANGE (2026-08-20) — POST-EXTRACTION SANITISE PASS. (Durants LLC / AEF.)
+// Three defects reached the wizard in one payload, and the reason they are being
+// fixed HERE rather than only in prompt.js matters:
+//
+//   • "term": "\"\"" — a two-character string of quote marks, not an empty
+//     value. prompt.js has carried a dedicated ABSENT VALUES paragraph naming
+//     this exact production failure since the schema was written, and
+//     EXTRACTION_TOOL's own term/dealStory descriptions repeat the warning. Two
+//     independent prompt-level guards, and it still shipped. A third rewording
+//     is not a fix. sanitizeExtraction() below normalises it in code, where it
+//     cannot be talked out of.
+//   • A placeholder asset row whose description was the sentence "Equipment
+//     (description not specified on application)" — prose in a data field,
+//     arriving as a junk line item for the rep to delete.
+//   • Equipment location left blank. assets[].street/city/state/zip already
+//     existed in the schema; no rule anywhere said what belonged in them.
+//     prompt.js now defines the default (buyer's business address);
+//     backfillEquipmentLocation() enforces it here so a prompt miss cannot
+//     reach the form.
+//
+// Ordering in /ocr is deliberate: verify SSNs → sanitise → backfill. Sanitising
+// before the backfill means the backfill tests genuinely-empty fields rather
+// than fields holding "N/A" or a quote-mark string, and the SSN pass runs first
+// so its adopted values and flags are themselves sanitised.
+//
+// These run on BOTH callers — the LWC path and the email-intake Queueable —
+// because they sit inside the /ocr handler and not in either client.
+
 import express from "express";
 import cors from "cors";
 import Anthropic from "@anthropic-ai/sdk";
@@ -277,6 +305,29 @@ async function verifyGuarantorSsns(creditAppBlock, data) {
 
   data.flags = Array.isArray(data.flags) ? data.flags : [];
 
+  // 2026-08-20 — DROP SUPERSEDED PASS-1 SSN FLAGS.
+  // Reconciliation was overwriting the VALUE but leaving pass 1's flag in place,
+  // so a recovered SSN arrived with two contradictory notes on the same field:
+  // "left blank per SSN rule" sitting directly above "recovered on a second
+  // read: <digits>", with the field populated. The rep cannot tell which note
+  // describes the value in front of them, and per Ryan's pilot feedback a flag
+  // block that reads as noise gets scrolled past entirely — so a contradiction
+  // here does not just confuse one field, it discounts every flag around it.
+  // Pass 2 is the authority on this field (see the header above), so its finding
+  // replaces pass 1's rather than joining it.
+  const dropStaleSsnFlag = (idx) => {
+    const target = `guarantors[${idx}].ssn`;
+    const before = data.flags.length;
+    data.flags = data.flags.filter((f) => !(f && f.field === target));
+    const removed = before - data.flags.length;
+    if (removed > 0) {
+      console.log(
+        `SSN verify: guarantors[${idx}] — removed ${removed} superseded pass-1 ` +
+          `flag(s) on ${target}; pass 2 finding replaces them.`
+      );
+    }
+  };
+
   data.guarantors.forEach((g, i) => {
     if (!g) return;
 
@@ -295,6 +346,11 @@ async function verifyGuarantorSsns(creditAppBlock, data) {
 
     if (d1.length === 9 && d2.length === 9 && d1 === d2) {
       g.ssn = d1;
+      // 2026-08-20 — two independent reads agreeing on nine digits is the
+      // STRONGEST evidence this pass can produce, so any pass-1 doubt on this
+      // field is now resolved and its flag comes off. Leaving it would ask the
+      // rep to hand-verify a value that has been confirmed twice.
+      dropStaleSsnFlag(i);
       return; // agreed. nothing to say.
     }
 
@@ -304,6 +360,7 @@ async function verifyGuarantorSsns(creditAppBlock, data) {
           `pass1 ends ${d1.slice(-4)}, pass2 ends ${d2.slice(-4)}.`
       );
       g.ssn = "";
+      dropStaleSsnFlag(i); // 2026-08-20 — the conflict below supersedes pass 1's note.
       data.flags.push({
         field: `guarantors[${i}].ssn`,
         issue: "conflict",
@@ -321,6 +378,11 @@ async function verifyGuarantorSsns(creditAppBlock, data) {
           `(pass 1 had ${d1.length} digits).`
       );
       g.ssn = d2;
+      // 2026-08-20 — this is the Durants case. Pass 1 miscounted a clean
+      // 106-62-0732 as eight digits and blanked it, leaving a flag saying the
+      // SSN was withheld. Adopting pass 2's value without removing that note
+      // ships a populated field under a note claiming it is empty.
+      dropStaleSsnFlag(i);
       data.flags.push({
         field: `guarantors[${i}].ssn`,
         issue: "low_confidence",
@@ -343,6 +405,219 @@ async function verifyGuarantorSsns(creditAppBlock, data) {
       );
     }
   });
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// POST-EXTRACTION SANITISE  (2026-08-20 — Durants LLC / AEF Equipment Finance)
+// ══════════════════════════════════════════════════════════════════════════
+// Everything below is a BACKSTOP, not the primary rule. prompt.js states each
+// of these as an instruction; this enforces them on the way out.
+//
+// Why enforce in code at all, given the prompt already says it: the "term":
+// "\"\"" defect shipped in a payload where prompt.js carried a paragraph naming
+// that exact string as a known production failure AND the tool schema repeated
+// the warning on the term field itself. Two guards, both ignored. A model
+// instruction is a strong prior, not a constraint, and the fields these touch
+// (a junk term, a phantom asset row, a blank site address) all land silently in
+// a wizard a rep is skimming. Cheap deterministic normalisation on the way out
+// is the right place for that class of defect.
+
+// Values that are semantically empty but arrive as content. The quote-mark
+// strings are the observed production failures; the rest are the prose the
+// model reaches for when a field is absent and it wants to say so.
+const EMPTY_SENTINELS = new Set([
+  '""', "''", '"', "'", "``",
+  "n/a", "na", "n.a.", "none", "null", "undefined", "-", "--", "—",
+  "not specified", "not provided", "not stated", "not listed", "not available",
+  "unknown", "unspecified", "tbd", "to be determined", "see notes", "blank",
+]);
+
+function isEmptyish(v) {
+  if (typeof v !== "string") return false;
+  const t = v.trim();
+  if (t === "") return false; // already empty — nothing to normalise
+  return EMPTY_SENTINELS.has(t.toLowerCase());
+}
+
+// A description that is a SENTENCE ABOUT ITS OWN ABSENCE rather than a value.
+// Matches the observed "Equipment (description not specified on application)"
+// and its neighbours, without touching a real description that happens to
+// contain the word "not".
+function isPlaceholderText(v) {
+  if (typeof v !== "string") return false;
+  const t = v.trim().toLowerCase();
+  if (t === "") return false;
+  return /\b(not\s+(specified|provided|stated|listed|given|available|indicated)|no\s+(description|details?|information)\s+(was\s+)?(specified|provided|given|available)|unspecified|description\s+not)\b/.test(
+    t
+  );
+}
+
+// Recursively replace empty-ish scalars with "". Mutates in place and reports
+// what it touched — a silent normaliser would hide a model regression, and the
+// count in the log is the signal that prompt.js needs another look.
+function normalizeEmptyStrings(node, path, hits) {
+  if (Array.isArray(node)) {
+    node.forEach((item, i) => normalizeEmptyStrings(item, `${path}[${i}]`, hits));
+    return;
+  }
+  if (!node || typeof node !== "object") return;
+
+  Object.keys(node).forEach((key) => {
+    const val = node[key];
+    const here = path ? `${path}.${key}` : key;
+    if (val && typeof val === "object") {
+      normalizeEmptyStrings(val, here, hits);
+    } else if (isEmptyish(val)) {
+      hits.push(`${here}=${JSON.stringify(val)}`);
+      node[key] = "";
+    }
+  });
+}
+
+function sanitizeExtraction(data) {
+  if (!data || typeof data !== "object") return;
+
+  // ── 1. Empty-ish scalars anywhere in the payload ────────────────────────
+  const hits = [];
+  normalizeEmptyStrings(data, "", hits);
+  if (hits.length) {
+    console.warn(
+      `Sanitise: normalised ${hits.length} empty-ish value(s) to "" — ` +
+        `${hits.join(", ")}. prompt.js ABSENT VALUES was not honoured; ` +
+        `if this fires regularly the rule needs revisiting.`
+    );
+  }
+
+  // ── 2. Placeholder asset rows ───────────────────────────────────────────
+  // An asset with no description, no cost and no address is not a line item —
+  // it is an apology occupying a row. The "missing" flag carries that meaning
+  // already; the row just makes the rep delete something.
+  if (Array.isArray(data.assets)) {
+    const before = data.assets.length;
+    data.assets = data.assets.filter((a) => {
+      if (!a || typeof a !== "object") return false;
+      if (isPlaceholderText(a.description)) {
+        console.warn(
+          `Sanitise: dropping placeholder asset description ` +
+            `${JSON.stringify(a.description)}.`
+        );
+        a.description = "";
+      }
+      const hasContent = ["description", "cost", "assetType", "street", "city", "state", "zip"]
+        .some((k) => String(a[k] == null ? "" : a[k]).trim() !== "");
+      return hasContent;
+    });
+    const dropped = before - data.assets.length;
+    if (dropped > 0) {
+      console.warn(`Sanitise: removed ${dropped} empty asset row(s) of ${before}.`);
+      data.flags = Array.isArray(data.flags) ? data.flags : [];
+      const alreadyFlagged = data.flags.some(
+        (f) => f && typeof f.field === "string" && f.field.startsWith("assets")
+      );
+      if (!alreadyFlagged) {
+        data.flags.push({
+          field: "assets",
+          issue: "missing",
+          note:
+            "No equipment description, cost or supplier was filled in on the " +
+            "application, and no invoice was supplied. Please add the equipment " +
+            "details before submitting.",
+        });
+      }
+    }
+  }
+}
+
+// ── Equipment location default ────────────────────────────────────────────
+// The rep's report: the equipment location was not auto-filled from the
+// business address. assets[].street/city/state/zip already existed; nothing
+// told the model to populate them. prompt.js now defines the precedence
+// (stated location -> invoice ship-to -> buyer's business address); this
+// enforces the third rung, which is the one that was silently skipped.
+//
+// Only fills a row whose address is ENTIRELY blank. A partially-stated address
+// is the document talking, and a half-copied address is worse than either — so
+// those are left exactly as extracted.
+function backfillEquipmentLocation(data) {
+  if (!data || !Array.isArray(data.assets)) return;
+
+  const c = data.customer || {};
+  const src = {
+    street: String(c.street || "").trim(),
+    city: String(c.city || "").trim(),
+    state: String(c.state || "").trim(),
+    zip: String(c.zip || "").trim(),
+  };
+
+  if (!src.street && !src.city) {
+    console.log(
+      "Equipment location: customer address is empty — nothing to default from; " +
+        "leaving asset addresses as extracted."
+    );
+    return;
+  }
+
+  // 2026-08-20 — assets can legitimately arrive EMPTY here: the Equipment Info
+  // section was blank on the application, so the placeholder row sanitise just
+  // removed it. Dropping the junk row and then having nowhere to put the site
+  // address would leave the rep exactly where they started, which is the thing
+  // they reported. Seed ONE row carrying the location and nothing else. This is
+  // not the placeholder pattern prompt.js forbids — that row's only content was
+  // a sentence about its own emptiness; this one carries a real address the rep
+  // would otherwise retype. The "missing" flag on assets (added by
+  // sanitizeExtraction) still stands: the equipment details are genuinely absent.
+  if (data.assets.length === 0) {
+    console.log(
+      "Equipment location: no asset rows — seeding one row with the business " +
+        "address so the rep has the site address prefilled."
+    );
+    data.assets.push({
+      description: "",
+      cost: "",
+      assetType: "",
+      street: "",
+      city: "",
+      state: "",
+      zip: "",
+    });
+  }
+
+  let filled = 0;
+  data.assets.forEach((a, i) => {
+    if (!a || typeof a !== "object") return;
+    const stated = ["street", "city", "state", "zip"].some(
+      (k) => String(a[k] == null ? "" : a[k]).trim() !== ""
+    );
+    if (stated) {
+      console.log(
+        `Equipment location: assets[${i}] already carries an address from the ` +
+          `document — leaving it.`
+      );
+      return;
+    }
+    a.street = src.street;
+    a.city = src.city;
+    a.state = src.state;
+    a.zip = src.zip;
+    filled += 1;
+  });
+
+  if (filled > 0) {
+    console.log(
+      `Equipment location: defaulted ${filled} asset row(s) to the business ` +
+        `address (${src.city}, ${src.state}).`
+    );
+    data.flags = Array.isArray(data.flags) ? data.flags : [];
+    data.flags.push({
+      field: "assets[0].street",
+      issue: "low_confidence",
+      note:
+        "Equipment location was not stated on the application, so it has been " +
+        "defaulted to the business address (" +
+        [src.street, src.city, src.state, src.zip].filter(Boolean).join(", ") +
+        "). Please confirm the equipment will be sited there.",
+    });
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -648,6 +923,18 @@ app.post("/ocr", checkToken, async (req, res) => {
     // Mutates in place; never throws; a failure leaves pass 1 untouched.
     const data = toolUse.input;
     await verifyGuarantorSsns(ca, data);
+
+    // 2026-08-20 — order matters. Sanitise BEFORE the backfill so the backfill
+    // tests genuinely-empty address fields rather than ones holding "N/A" or a
+    // quote-mark string; run both AFTER the SSN pass so its adopted values and
+    // reconciliation flags are sanitised too. Neither throws.
+    sanitizeExtraction(data);
+    backfillEquipmentLocation(data);
+
+    console.log(
+      `OCR complete: ${(data.guarantors || []).length} guarantor(s), ` +
+        `${(data.assets || []).length} asset(s), ${(data.flags || []).length} flag(s).`
+    );
 
     return res.json({ ok: true, data });
   } catch (err) {
