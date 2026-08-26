@@ -268,14 +268,34 @@ function ssnDigits(v) {
   return String(v == null ? "" : v).replace(/\D/g, "");
 }
 
-async function verifyGuarantorSsns(creditAppBlock, data) {
-  if (SSN_VERIFY === "off" || !creditAppBlock) return;
-  if (!data || !Array.isArray(data.guarantors) || data.guarantors.length === 0) return;
-
-  const anyProblem = data.guarantors.some((g) => ssnDigits(g && g.ssn).length !== 9);
-  if (SSN_VERIFY === "onissue" && !anyProblem) return;
-
-  let owners;
+// 2026-08-26 — SPLIT INTO READ + RECONCILE SO THE READ CAN RUN CONCURRENTLY.
+//
+// Nothing about the two-pass design changes here. What changes is WHEN pass 2
+// starts. It was awaited after pass 1 returned, which made the endpoint cost
+// pass1 + pass2 in wall-clock time even though pass 2 never needed pass 1's
+// output to BEGIN: its entire input is the credit-application block (built well
+// before pass 1 is dispatched) and a fixed prompt. Pass 1's output is needed
+// only to reconcile against, which happens after both have landed either way.
+//
+// So under SSN_VERIFY="always" — the default, and the mode the pilot runs — the
+// caller now dispatches this read first and awaits it after pass 1 resolves.
+// Two calls in flight instead of two calls in series; the shorter one costs
+// roughly nothing in wall clock. Reps reported 20–40s; this is the single
+// largest contributor to that number.
+//
+// "onissue" deliberately KEEPS the old sequential path (see verifyGuarantorSsns
+// below). That mode exists to trade coverage for spend, and firing the call
+// speculatively before knowing whether pass 1 left a problem would spend on
+// every extraction — which is the exact thing the mode is for avoiding. Slow
+// but cheap is a coherent choice; fast and expensive under a flag named
+// "onissue" is not.
+//
+// Never rejects. Returns the owners array, or null on any failure — a failed
+// verification must leave pass 1 untouched, and the caller may abandon this
+// promise entirely if pass 1 returns a 422, so a rejection here would surface
+// as an unhandled rejection with no one left to catch it.
+async function readGuarantorSsns(creditAppBlock) {
+  if (!creditAppBlock) return null;
   try {
     const verify = await anthropic.messages.create({
       model: MODEL,
@@ -291,17 +311,39 @@ async function verifyGuarantorSsns(creditAppBlock, data) {
     });
 
     const block = (verify.content || []).find((b) => b.type === "tool_use");
-    owners = block && block.input && block.input.owners;
+    const owners = block && block.input && block.input.owners;
     if (!Array.isArray(owners)) {
       console.error("SSN verify: no usable owners array returned — leaving pass 1 as-is.");
-      return;
+      return null;
     }
+    return owners;
   } catch (err) {
     // Never fatal. A failed verification leaves the extraction exactly as pass 1
     // produced it, which is the pre-2026-08-18 behaviour.
     console.error("SSN verify call failed:", err?.message || err);
-    return;
+    return null;
   }
+}
+
+// Sequential path — retained for SSN_VERIFY="onissue" and as the email-intake
+// fallback. Identical behaviour to the pre-2026-08-26 function: decide whether
+// the call is warranted from pass 1's output, then make it.
+async function verifyGuarantorSsns(creditAppBlock, data) {
+  if (SSN_VERIFY === "off" || !creditAppBlock) return;
+  if (!data || !Array.isArray(data.guarantors) || data.guarantors.length === 0) return;
+
+  const anyProblem = data.guarantors.some((g) => ssnDigits(g && g.ssn).length !== 9);
+  if (SSN_VERIFY === "onissue" && !anyProblem) return;
+
+  reconcileGuarantorSsns(data, await readGuarantorSsns(creditAppBlock));
+}
+
+// Reconciliation — unchanged logic, now callable independently of how the read
+// was dispatched. Synchronous and total: every exit leaves `data` in a valid
+// state, and a null/unusable `owners` is a no-op rather than an error.
+function reconcileGuarantorSsns(data, owners) {
+  if (!Array.isArray(owners)) return;
+  if (!data || !Array.isArray(data.guarantors) || data.guarantors.length === 0) return;
 
   data.flags = Array.isArray(data.flags) ? data.flags : [];
 
@@ -879,6 +921,19 @@ app.post("/ocr", checkToken, async (req, res) => {
 
     content.push({ type: "text", text: SCHEMA_PROMPT });
 
+    // 2026-08-26 — DISPATCH THE SSN READ BEFORE AWAITING PASS 1.
+    // Both calls are now in flight together. This line does not await; it hands
+    // back a promise that is already running by the time the extraction below
+    // starts, so the SSN pass costs roughly nothing in wall clock instead of
+    // adding its full duration on top. See readGuarantorSsns for why this is
+    // safe to start early and why "onissue" is excluded.
+    //
+    // readGuarantorSsns never rejects, which matters: the 422 paths below can
+    // return before this promise is ever awaited, and an orphaned rejecting
+    // promise would crash the process with no handler attached.
+    const ssnReadPromise =
+      SSN_VERIFY === "always" && ca ? readGuarantorSsns(ca) : null;
+
     const message = await anthropic.messages.create({
       model: MODEL,
       max_tokens: MAX_TOKENS,
@@ -921,8 +976,21 @@ app.post("/ocr", checkToken, async (req, res) => {
     // 2026-08-18 — second, focused read of the guarantor SSNs before the payload
     // leaves the service, so both the LWC path and the email-intake path get it.
     // Mutates in place; never throws; a failure leaves pass 1 untouched.
+    //
+    // 2026-08-26 — under the default "always" mode the read was already
+    // dispatched above and is likely finished by now, so this await usually
+    // returns immediately. The reconciliation itself is unchanged. Under
+    // "onissue" / "off" the sequential helper still owns the decision.
     const data = toolUse.input;
-    await verifyGuarantorSsns(ca, data);
+    if (ssnReadPromise) {
+      const owners = await ssnReadPromise;
+      console.log(
+        `SSN verify: concurrent read ${owners ? "returned " + owners.length + " owner(s)" : "unavailable"}.`
+      );
+      reconcileGuarantorSsns(data, owners);
+    } else {
+      await verifyGuarantorSsns(ca, data);
+    }
 
     // 2026-08-20 — order matters. Sanitise BEFORE the backfill so the backfill
     // tests genuinely-empty address fields rather than ones holding "N/A" or a
