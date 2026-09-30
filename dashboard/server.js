@@ -89,6 +89,7 @@ import express from "express";
 import cors from "cors";
 import Anthropic from "@anthropic-ai/sdk";
 import { SCHEMA_PROMPT } from "./prompt.js";
+import { registerTitleDocs } from "./titleDocs.js"; // 2026-09 (Title Docs)
 import { INSIGHT_PROMPT } from "./insightPrompt.js";   // Jul 2026
 
 // ── Config (all from environment) ─────────────────────────────────────────
@@ -1152,6 +1153,9 @@ app.post("/insights", checkToken, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Analysis failed. Please retry." });
   }
 });
+
+// 2026-09 (Title Docs) Titling package reading and checks — see titleDocs.js.
+registerTitleDocs(app, { anthropic, model: MODEL, checkToken, fileBlock });
 
 if (!SHARED_TOKEN) {
   console.warn(
