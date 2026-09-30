@@ -321,3 +321,26 @@ test("a title already in the customer's name with no assignment is a lien additi
   assert.equal(c.status, "warn");
   assert.match(c.detail, /already in the customer's name/);
 });
+
+// ── From a partner's full package (29 Sep 2026) ─────────────────────────
+test("a POA granted by the customer's owner personally counts as a buyer POA", () => {
+  const p = cleanPackage();
+  const poa = p.documents.find((d) => d.type === "power_of_attorney");
+  poa.poa_owner_name = "Pat Owner";   // an individual, not the seller on the title
+  p.documents.push({ ...poa, pages: [17], poa_owner_name: "Acme Paving LLC" });
+  assert.equal(status(runChecks(p, EXPECTED), "poa_count"), "pass");
+});
+
+test("a POA granted by the title's seller is a seller POA", () => {
+  const p = cleanPackage();
+  p.documents.find((d) => d.type === "power_of_attorney").poa_owner_name = "Desert Truck Centers of Arizona Inc";
+  assert.equal(status(runChecks(p, { ...EXPECTED, privateSale: true }), "seller_poa"), "pass");
+});
+
+test("a liability limit the certificate does not show is not failed", () => {
+  const p = cleanPackage();
+  p.documents.push(doc("insurance", [16], { loss_payee: "Navitas Credit Corp", liability_each_occurrence: 1000000, liability_aggregate: 0 }));
+  assert.equal(status(runChecks(p, EXPECTED), "insurance_liability"), "pass");
+  p.documents[p.documents.length - 1].liability_each_occurrence = 100000;
+  assert.equal(status(runChecks(p, EXPECTED), "insurance_liability"), "fail");
+});

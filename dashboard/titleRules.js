@@ -348,9 +348,16 @@ export function runChecks(extraction, expected = {}) {
   if (poas.length || (!exp.docType && titles.length)) {
     // Role by name first: a POA granted by our customer is a buyer POA, whatever the model called it.
     const customer = exp.customerName || (efa && efa.customer_legal_name);
-    const roleOf = (d) => customer && d.poa_owner_name
-      ? (sameName(d.poa_owner_name, customer) ? "buyer" : "seller")
-      : d.poa_role === "seller" ? "seller" : "buyer";
+    // A seller POA is granted by the party selling the vehicle: the title owner or an assignor.
+    // Anyone else (the customer, or its owner signing personally) is a buyer.
+    const sellers = [...titles.flatMap((d) => d.owner_names || []),
+      ...[...titles, ...backs].flatMap((d) => (d.assignments || []).map((a) => a.seller_name))].filter(Boolean);
+    const roleOf = (d) => {
+      if (d.poa_owner_name && customer && sameName(d.poa_owner_name, customer)) return "buyer";
+      if (d.poa_owner_name && sellers.some((x) => sameName(x, d.poa_owner_name))) return "seller";
+      if (d.poa_owner_name && sellers.length) return "buyer";
+      return d.poa_role === "seller" ? "seller" : "buyer";
+    };
     const buyerPoas = poas.filter((d) => roleOf(d) === "buyer");
     const sellerPoas = poas.filter((d) => roleOf(d) === "seller");
     // A POA whose notary block says "see attached" is notarized by a separate acknowledgment page
@@ -418,10 +425,14 @@ export function runChecks(extraction, expected = {}) {
       add("insurance_limit", "Property coverage at least the equipment cost", ins.property_limit >= cost * 0.99 ? "pass" : "fail",
         `Coverage $${ins.property_limit.toLocaleString()} vs cost $${Number(cost).toLocaleString()}.`, [where(ins)]);
     }
-    if (ins.liability_each_occurrence != null || ins.liability_aggregate != null) {
-      const ok = (ins.liability_each_occurrence || 0) >= 300000 && (ins.liability_aggregate || 0) >= 600000;
+    // A limit the certificate does not show (null or 0) is not checked; one that is shown must meet the minimum.
+    const occ = ins.liability_each_occurrence || null;
+    const agg = ins.liability_aggregate || null;
+    if (occ || agg) {
+      const ok = (!occ || occ >= 300000) && (!agg || agg >= 600000);
       add("insurance_liability", "Liability at least $300,000 / $600,000", ok ? "pass" : "fail",
-        `Each occurrence $${(ins.liability_each_occurrence || 0).toLocaleString()}, aggregate $${(ins.liability_aggregate || 0).toLocaleString()}.`,
+        [occ ? `Each occurrence $${occ.toLocaleString()}` : "Each occurrence not shown",
+          agg ? `aggregate $${agg.toLocaleString()}` : "aggregate not shown"].join(", ") + ".",
         [where(ins)]);
     }
     if (ins.additional_insured && isNavitas(ins.additional_insured)) {
