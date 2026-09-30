@@ -1,6 +1,11 @@
 // 2026-09 (Title Docs) POST /title-docs — read titling documents and check them.
 //
-// Body: {
+// Body, either:
+//   JSON: { files: [{ media_type, data (base64), name? }] (1 to 10), expected: {...} }
+//   2026-09 (Title Package) or the raw file: Content-Type application/pdf or image/*, with
+//     expected as base64 JSON in the X-Title-Expected header. Salesforce sends packages this
+//     way: without base64 a 10 MB package fits Apex's 12 MB async heap.
+// {
 //   files:    [{ media_type, data (base64), name? }]   — 1 to 10 files (PDF or image)
 //   expected: { dealNumber, customerName, vins, referenceDate, payingOffLien,
 //               privateSale, insuranceRequired, docType, cost }   — see titleRules.js
@@ -10,6 +15,7 @@
 // Salesforce (CreditAppOcrController, called from a Queueable after a rep uploads a
 // document) sends the same X-Navitas-Token as /ocr. Logs carry counts only — never
 // document contents, names or numbers.
+import express from "express";
 import { TITLE_TOOL, TITLE_PROMPT } from "./titlePrompt.js";
 import { runChecks } from "./titleRules.js";
 
@@ -31,10 +37,23 @@ function asArray(value, key) {
 export function registerTitleDocs(app, { anthropic, model, checkToken, fileBlock }) {
   const maxTokens = parseInt(process.env.TITLE_MAX_TOKENS || "16000", 10);
 
-  app.post("/title-docs", checkToken, async (req, res) => {
+  const raw = express.raw({ type: ["application/pdf", "image/*"], limit: "30mb" });
+
+  app.post("/title-docs", checkToken, raw, async (req, res) => {
     const started = Date.now();
     try {
-      const { files, expected } = req.body || {};
+      let files;
+      let expected;
+      if (Buffer.isBuffer(req.body)) {
+        files = [{ media_type: req.get("content-type").split(";")[0].trim(), data: req.body.toString("base64") }];
+        try {
+          expected = JSON.parse(Buffer.from(req.get("x-title-expected") || "", "base64").toString("utf8") || "{}");
+        } catch {
+          return res.status(400).json({ ok: false, error: "X-Title-Expected is not base64 JSON." });
+        }
+      } else {
+        ({ files, expected } = req.body || {});
+      }
       const list = Array.isArray(files) ? files : [];
       if (!list.length || list.length > MAX_FILES) {
         return res.status(400).json({ ok: false, error: `Send 1 to ${MAX_FILES} files.` });

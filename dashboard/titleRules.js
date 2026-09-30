@@ -79,6 +79,15 @@ function diffCount(a, b) {
   return d[a.length][b.length];
 }
 
+// A check's detail often lists several documents ("title_front (file 1, p1): ...; invoice (...): ...").
+// For one document keep only its own segments, plus segments that name no document at all.
+const DOC_REF = /^[a-z_]+ \(file \d+, p[\d,]+\)/;
+function ownPart(detail, ref) {
+  const parts = String(detail || "").split("; ");
+  const kept = parts.filter((x) => x.startsWith(ref) || !DOC_REF.test(x));
+  return kept.join("; ");
+}
+
 // Only Navitas documents carry the Navitas contract number.
 const NAVITAS_DOCS = ["title_information_sheet", "power_of_attorney", "equipment_finance_agreement",
   "titled_addendum", "other_addendum", "one_and_same_letter"];
@@ -120,6 +129,7 @@ export function runChecks(extraction, expected = {}) {
   const today = exp.referenceDate || new Date().toISOString().slice(0, 10);
   const of = (...types) => docs.filter((d) => types.includes(d.type));
   const checks = [];
+  const roles = new Map();   // POA document → "buyer" / "seller", for filing
   const add = (id, label, status, detail, evidence = []) =>
     checks.push({ id, label, status, detail, evidence });
 
@@ -218,71 +228,92 @@ export function runChecks(extraction, expected = {}) {
       titles.length ? titles.map(where).join("; ") : eTitle.length ? "Electronic title copy only." : "No title found. No title, no review.",
       titles.map(where));
 
-    const fronts = of("title_front");
-    if (fronts.length && !exp.docType) {
-      add("title_back_present", "Title back or reassignment is present", backs.length ? "pass" : "fail",
-        backs.length ? backs.map(where).join("; ") : "Title front without its back: the assignment cannot be checked.");
-    }
+    // 2026-09 (Title Package) One group per vehicle: a title front / MSO / GOT and the back or
+    // reassignment pages that follow it until the next one. A file with four trailer titles is
+    // four groups; each is checked on its own. Backs before any front form their own group.
+    const groups = [];
+    [...titles, ...backs, ...eTitle]
+      .sort((a, b) => (a.file_index - b.file_index) || ((a.pages || [0])[0] - (b.pages || [0])[0]))
+      .forEach((d) => {
+        const starts = ["title_front", "mso", "guaranty_of_title", "electronic_title_copy"].includes(d.type);
+        if (starts || !groups.length) groups.push({ head: starts ? d : null, docs: [d] });
+        else groups[groups.length - 1].docs.push(d);
+      });
+    const many = groups.length > 1;
+    groups.forEach((g) => checkTitleGroup(g, many));
 
-    // Unreleased liens
-    const lienDocs = [...titles, ...eTitle];
-    const liens = lienDocs.flatMap((d) => (d.lienholders || []).map((l) => ({ ...l, doc: d })))
-      .filter((l) => l.name && !NO_LIEN.test(String(l.name).trim()));
-    const foreign = liens.filter((l) => !isNavitas(l.name) && l.released !== true);
-    if (lienDocs.length) {
-      const releaseDoc = of("lien_release");
-      let status = "pass";
-      let detail = lienDocs.some((d) => d.no_liens_stated) ? "Title states no liens." : "No other lienholder shown.";
-      if (foreign.length) {
-        detail = `Unreleased lien: ${foreign.map((l) => l.name).join(", ")}.`;
-        if (releaseDoc.length) { status = "pass"; detail += " Lien release provided."; }
-        else if (exp.payingOffLien) { status = "warn"; detail += " Navitas is paying it off — confirm the payoff."; }
-        else if (broker) { status = "warn"; detail += " Broker deal — confirm the lien is assigned to Navitas or released."; }
-        else status = "fail";
+    function checkTitleGroup(g, labelled) {
+      const vin = g.docs.map((d) => vinKey(d.vin)).find(Boolean);
+      const tag = labelled ? ` (${vin ? "VIN " + vin : where(g.docs[0])})` : "";
+      const gTitles = g.docs.filter((d) => ["title_front", "mso", "guaranty_of_title"].includes(d.type));
+      const gBacks = g.docs.filter((d) => ["title_back", "reassignment_form"].includes(d.type));
+      const gE = g.docs.filter((d) => d.type === "electronic_title_copy");
+
+      if (g.head && g.head.type === "title_front" && !exp.docType) {
+        add("title_back_present", "Title back or reassignment is present" + tag, gBacks.length ? "pass" : "fail",
+          gBacks.length ? gBacks.map(where).join("; ") : "Title front without its back: the assignment cannot be checked.",
+          [where(g.head)]);
       }
-      add("unreleased_liens", "No unreleased lien on the title", status, detail, foreign.map((l) => where(l.doc)));
-    }
 
-    // Assignment chain
-    const assignments = [...titles, ...backs].flatMap((d) => (d.assignments || []).map((a) => ({ ...a, doc: d })))
-      .filter((a) => a.buyer_name || a.seller_name);
-    if (titles.length || backs.length) {
+      // Unreleased liens
+      const lienDocs = [...gTitles, ...gE];
+      const liens = lienDocs.flatMap((d) => (d.lienholders || []).map((l) => ({ ...l, doc: d })))
+        .filter((l) => l.name && !NO_LIEN.test(String(l.name).trim()));
+      const foreign = liens.filter((l) => !isNavitas(l.name) && l.released !== true);
+      if (lienDocs.length) {
+        const releaseDoc = of("lien_release").filter((d) => !vin || !vinKey(d.vin) || vinKey(d.vin) === vin);
+        let status = "pass";
+        let detail = lienDocs.some((d) => d.no_liens_stated) ? "Title states no liens." : "No other lienholder shown.";
+        if (foreign.length) {
+          detail = `Unreleased lien: ${foreign.map((l) => l.name).join(", ")}.`;
+          if (releaseDoc.length) { status = "pass"; detail += " Lien release provided."; }
+          else if (exp.payingOffLien) { status = "warn"; detail += " Navitas is paying it off — confirm the payoff."; }
+          else if (broker) { status = "warn"; detail += " Broker deal — confirm the lien is assigned to Navitas or released."; }
+          else status = "fail";
+        }
+        add("unreleased_liens", "No unreleased lien on the title" + tag, status, detail, lienDocs.map(where));
+      }
+
+      // Assignment chain
+      const assignments = [...gTitles, ...gBacks].flatMap((d) => (d.assignments || []).map((a) => ({ ...a, doc: d })))
+        .filter((a) => a.buyer_name || a.seller_name);
+      if (!gTitles.length && !gBacks.length) return;
       if (!assignments.length) {
         // No assignment filled in: fine only when the title is already in the customer's name
         // (lien addition). A title still in the seller's name has not been signed over yet.
-        const owners = titles.flatMap((d) => d.owner_names || []).filter(Boolean);
+        const owners = gTitles.flatMap((d) => d.owner_names || []).filter(Boolean);
         const ownerIsCustomer = exp.customerName && owners.some((o) => sameName(o, exp.customerName));
         if (exp.customerName && owners.length && !ownerIsCustomer) {
-          add("chain_to_customer", "Last assignment is to our customer", "fail",
+          add("chain_to_customer", "Last assignment is to our customer" + tag, "fail",
             `Title is still in ${owners.join(", ")}'s name and has not been assigned to the customer.`,
-            titles.map(where));
+            g.docs.map(where));
         } else {
-          add("chain_to_customer", "Last assignment is to our customer", "warn",
+          add("chain_to_customer", "Last assignment is to our customer" + tag, "warn",
             ownerIsCustomer ? "Title is already in the customer's name (lien addition only)."
               : "No filled-in assignment found — the title may already be in the customer's name (lien addition only).",
-            titles.map(where));
+            g.docs.map(where));
         }
-      } else {
-        const last = assignments[assignments.length - 1];
-        const ok = exp.customerName ? sameName(last.buyer_name, exp.customerName) : null;
-        add("chain_to_customer", "Last assignment is to our customer",
-          ok === null ? "warn" : ok ? "pass" : "fail",
-          !last.buyer_name ? `The buyer's name is blank on the last assignment (from ${last.seller_name || "the seller"}).`
-            : `Last assignment: ${last.seller_name || "?"} → ${last.buyer_name}` + (ok === false ? `; expected ${exp.customerName}.` : "."),
-          [where(last.doc)]);
-        const unsigned = assignments.filter((a) => a.seller_signed === false);
-        if (unsigned.length) {
-          add("assignment_signed", "Seller signed every assignment", "fail",
-            unsigned.map((a) => `${a.seller_name || "seller"} → ${a.buyer_name || "buyer"} not signed`).join("; "),
-            unsigned.map((a) => where(a.doc)));
-        }
-        const named = last.new_lienholder;
-        add("lienholder_on_assignment", `${exp.lienholder} is named as new lienholder`,
-          !named ? "warn" : isNavitas(named) ? "pass" : broker ? "warn" : "fail",
-          !named ? "No new lienholder written on the last assignment (some states, e.g. VA, add it on the title application)."
-            : `New lienholder written: ${named}.`,
-          [where(last.doc)]);
+        return;
       }
+      const last = assignments[assignments.length - 1];
+      const ok = exp.customerName ? sameName(last.buyer_name, exp.customerName) : null;
+      add("chain_to_customer", "Last assignment is to our customer" + tag,
+        ok === null ? "warn" : ok ? "pass" : "fail",
+        !last.buyer_name ? `The buyer's name is blank on the last assignment (from ${last.seller_name || "the seller"}).`
+          : `Last assignment: ${last.seller_name || "?"} → ${last.buyer_name}` + (ok === false ? `; expected ${exp.customerName}.` : "."),
+        [where(last.doc)]);
+      const unsigned = assignments.filter((a) => a.seller_signed === false);
+      if (unsigned.length) {
+        add("assignment_signed", "Seller signed every assignment" + tag, "fail",
+          unsigned.map((a) => `${a.seller_name || "seller"} → ${a.buyer_name || "buyer"} not signed`).join("; "),
+          unsigned.map((a) => where(a.doc)));
+      }
+      const named = last.new_lienholder;
+      add("lienholder_on_assignment", `${exp.lienholder} is named as new lienholder` + tag,
+        !named ? "warn" : isNavitas(named) ? "pass" : broker ? "warn" : "fail",
+        !named ? "No new lienholder written on the last assignment (some states, e.g. VA, add it on the title application)."
+          : `New lienholder written: ${named}.`,
+        [where(last.doc)]);
     }
   }
 
@@ -358,6 +389,7 @@ export function runChecks(extraction, expected = {}) {
       if (d.poa_owner_name && sellers.length) return "buyer";
       return d.poa_role === "seller" ? "seller" : "buyer";
     };
+    poas.forEach((d) => { roles.set(d, roleOf(d)); });
     const buyerPoas = poas.filter((d) => roleOf(d) === "buyer");
     const sellerPoas = poas.filter((d) => roleOf(d) === "seller");
     // A POA whose notary block says "see attached" is notarized by a separate acknowledgment page
@@ -456,5 +488,24 @@ export function runChecks(extraction, expected = {}) {
     summary: { pass: count("pass"), fail: count("fail"), warn: count("warn"), na: count("na") },
     verdict: count("fail") ? "fail" : count("warn") ? "review" : "pass",
     checks,
+    // 2026-09 (Title Package) A verdict per document, from the checks whose evidence points at
+    // its pages, so a package's title and license can pass or fail separately when filed.
+    documents: docs.map((d, index) => {
+      const ref = where(d);
+      const mine = checks.filter((c) => (c.evidence || []).includes(ref) && c.status !== "na");
+      const fails = mine.filter((c) => c.status === "fail");
+      const warns = mine.filter((c) => c.status === "warn");
+      return {
+        index,
+        type: d.type,
+        pages: d.pages || [],
+        vin: vinKey(d.vin) || null,
+        vins: vinKey(d.vin) ? [vinKey(d.vin)] : [],
+        role: roles.get(d) || null,
+        notarized: d.notarized === true || (d.type === "power_of_attorney" && of("notary_acknowledgment").length > 0 && d.notarized !== false),
+        verdict: fails.length ? "fail" : warns.length ? "review" : "pass",
+        problems: [...fails, ...warns].map((c) => ownPart(c.detail, ref)).filter(Boolean),
+      };
+    }),
   };
 }

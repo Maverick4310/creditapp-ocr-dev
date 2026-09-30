@@ -344,3 +344,37 @@ test("a liability limit the certificate does not show is not failed", () => {
   p.documents[p.documents.length - 1].liability_each_occurrence = 100000;
   assert.equal(status(runChecks(p, EXPECTED), "insurance_liability"), "fail");
 });
+
+// ── Title Package: a verdict per document (29 Sep 2026) ─────────────────
+test("each document gets its own verdict and problems", () => {
+  const p = cleanPackage();
+  p.documents.find((d) => d.type === "drivers_license").license_expiration = "2025-01-01";
+  const r = runChecks(p, EXPECTED);
+  const lic = r.documents.find((d) => d.type === "drivers_license");
+  const front = r.documents.find((d) => d.type === "title_front");
+  assert.equal(lic.verdict, "fail");
+  assert.match(lic.problems.join(" "), /expired/);
+  assert.equal(front.verdict, "pass");
+  assert.equal(front.vin, VIN);
+  assert.equal(r.documents.find((d) => d.type === "power_of_attorney").role, "buyer");
+});
+
+test("a file with several titles checks each vehicle on its own", () => {
+  const V1 = "1M8GDM9AXKP042788";
+  const V2 = "1FTFW1E50NFA00002";
+  const extraction = { documents: [
+    doc("title_front", [1], { vin: V1, owner_names: ["Seller One"], lienholders: [] }),
+    doc("title_back", [2], { assignments: [{ seller_name: "Seller One", buyer_name: "Acme Paving LLC", seller_signed: true, new_lienholder: "Navitas Credit Corp" }] }),
+    doc("title_front", [3], { vin: V2, owner_names: ["Seller Two"], lienholders: [] }),
+    doc("reassignment_form", [4], { assignments: [{ seller_name: "Seller Two", buyer_name: "Someone Else Inc", seller_signed: true }] }),
+  ] };
+  const r = runChecks(extraction, { customerName: "Acme Paving LLC", vins: [V1, V2] });
+  const chains = r.checks.filter((c) => c.id === "chain_to_customer");
+  assert.equal(chains.length, 2);
+  assert.equal(chains.find((c) => c.label.includes(V1)).status, "pass");
+  assert.equal(chains.find((c) => c.label.includes(V2)).status, "fail");
+  const byPage = (pg) => r.documents.find((d) => d.pages[0] === pg);
+  assert.equal(byPage(2).verdict, "pass", "trailer 1's back is not failed by trailer 2");
+  assert.equal(byPage(4).verdict, "fail");
+  assert.ok(!byPage(2).problems.join(" ").includes("p4"), "no other document's problems");
+});
