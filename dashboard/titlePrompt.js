@@ -65,6 +65,13 @@ export const TITLE_TOOL = {
             title_state: str,
             title_number: str,
             owner_names: { type: "array", items: { type: "string" } },
+            // 2026-09 (Sheet prefill) Vehicle facts printed on some titles.
+            body_type: { type: ["string", "null"], description: "Body type code as printed, e.g. TK, TR, TRL, VN, PU" },
+            color: str,
+            odometer: str,
+            gross_weight: num,
+            empty_weight: num,
+            axles: num,
             no_liens_stated: bool,
             lienholders: {
               type: "array",
@@ -102,6 +109,12 @@ export const TITLE_TOOL = {
             buyer_signed: bool,
             // Equipment Finance Agreement
             customer_legal_name: str,
+            federal_tax_id: { type: ["string", "null"], description: "Business federal tax ID / EIN on the EFA (9 digits). Never a Social Security number." },
+            customer_street: str,
+            customer_city: str,
+            customer_state: str,
+            customer_zip: str,
+            equipment_location: { type: ["string", "null"], description: "Equipment location address, if different from the customer address" },
             secured_party: str,
             amount_financed: num,
             pay_proceeds_vendor: str,
@@ -121,6 +134,8 @@ export const TITLE_TOOL = {
             license_number_last4: str,
             // Insurance
             insured_name: str,
+            insurer: { type: ["string", "null"], description: "Insurance company (carrier) name" },
+            policy_number: str,
             loss_payee: str,
             additional_insured: str,
             comprehensive_and_collision: bool,
@@ -187,8 +202,12 @@ WHAT TO COPY
   add the note "notary acknowledgment attached". A separate acknowledgment page (e.g. a
   California All-Purpose Acknowledgment) is its own notary_acknowledgment entry.
 - EFA: amount_financed is "Amount Financed"; pay_proceeds_vendor is the vendor named in
-  the Pay Proceeds Direction (or the VENDOR box).
-- Insurance: loss_payee exactly as written; limits as numbers.
+  the Pay Proceeds Direction (or the VENDOR box). federal_tax_id is the business tax ID
+  printed on the EFA (the "Federal Tax ID#" box); customer_street/city/state/zip is the
+  borrower address; equipment_location only when a separate equipment location is given.
+- Title: body_type, color, odometer, weights and axles only when printed on the title.
+- Insurance: loss_payee exactly as written; limits as numbers; insurer is the carrier
+  (the INSURER row on an ACORD certificate); policy_number as printed.
 
 PRIVACY — do NOT copy these, anywhere, including notes:
 - full driver's license numbers (only the last 4 digits, in license_number_last4)
