@@ -248,8 +248,20 @@ export function runChecks(extraction, expected = {}) {
       .filter((a) => a.buyer_name || a.seller_name);
     if (titles.length || backs.length) {
       if (!assignments.length) {
-        add("chain_to_customer", "Last assignment is to our customer", "warn",
-          "No filled-in assignment found — the title may already be in the customer's name (lien addition only).");
+        // No assignment filled in: fine only when the title is already in the customer's name
+        // (lien addition). A title still in the seller's name has not been signed over yet.
+        const owners = titles.flatMap((d) => d.owner_names || []).filter(Boolean);
+        const ownerIsCustomer = exp.customerName && owners.some((o) => sameName(o, exp.customerName));
+        if (exp.customerName && owners.length && !ownerIsCustomer) {
+          add("chain_to_customer", "Last assignment is to our customer", "fail",
+            `Title is still in ${owners.join(", ")}'s name and has not been assigned to the customer.`,
+            titles.map(where));
+        } else {
+          add("chain_to_customer", "Last assignment is to our customer", "warn",
+            ownerIsCustomer ? "Title is already in the customer's name (lien addition only)."
+              : "No filled-in assignment found — the title may already be in the customer's name (lien addition only).",
+            titles.map(where));
+        }
       } else {
         const last = assignments[assignments.length - 1];
         const ok = exp.customerName ? sameName(last.buyer_name, exp.customerName) : null;

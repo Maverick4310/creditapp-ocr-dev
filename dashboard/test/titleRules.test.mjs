@@ -302,3 +302,22 @@ test("a POA notarized by an attached acknowledgment (California) is review, not 
   p.documents.pop();
   assert.equal(status(runChecks(p, EXPECTED), "poa_notarized"), "fail", "without the acknowledgment page it is still missing");
 });
+
+// ── From the first live upload (Idaho title, 29 Sep 2026) ───────────────
+test("a title still in the seller's name with no assignment fails", () => {
+  const p = cleanPackage();
+  p.documents[1].owner_names = ["Desert Truck Centers of Arizona Inc"];
+  p.documents[2].assignments = [];
+  const c = runChecks(p, EXPECTED).checks.find((x) => x.id === "chain_to_customer");
+  assert.equal(c.status, "fail");
+  assert.match(c.detail, /still in Desert Truck Centers of Arizona Inc's name/);
+});
+
+test("a title already in the customer's name with no assignment is a lien addition", () => {
+  const p = cleanPackage();
+  p.documents[1].owner_names = ["Acme Paving LLC"];
+  p.documents[2].assignments = [];
+  const c = runChecks(p, EXPECTED).checks.find((x) => x.id === "chain_to_customer");
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /already in the customer's name/);
+});
