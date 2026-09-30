@@ -12,10 +12,15 @@
 // }
 // Returns: { ok, data: { documents, package_notes }, result: { verdict, summary, checks } }
 //
+// 2026-09 (Title Split) POST /title-docs/split — the raw package PDF, with the 1-based pages
+// to keep in the X-Split-Pages header ("3,4"). Returns just those pages as a PDF. No model
+// call: Salesforce uses it to save each filed document as its own file.
+//
 // Salesforce (CreditAppOcrController, called from a Queueable after a rep uploads a
 // document) sends the same X-Navitas-Token as /ocr. Logs carry counts only — never
 // document contents, names or numbers.
 import express from "express";
+import { PDFDocument } from "pdf-lib"; // 2026-09 (Title Split)
 import { TITLE_TOOL, TITLE_PROMPT } from "./titlePrompt.js";
 import { runChecks } from "./titleRules.js";
 
@@ -114,4 +119,46 @@ export function registerTitleDocs(app, { anthropic, model, checkToken, fileBlock
       return res.status(500).json({ ok: false, error: "Reading the documents failed. Please retry." });
     }
   });
+
+  // 2026-09 (Title Split)
+  const rawPdf = express.raw({ type: "application/pdf", limit: "30mb" });
+  app.post("/title-docs/split", checkToken, rawPdf, async (req, res) => {
+    try {
+      if (!Buffer.isBuffer(req.body) || !req.body.length) {
+        return res.status(400).json({ ok: false, error: "Send the PDF as application/pdf." });
+      }
+      const pages = parsePages(req.get("x-split-pages"));
+      if (!pages) return res.status(400).json({ ok: false, error: "X-Split-Pages must list page numbers, e.g. 3,4." });
+      const src = await PDFDocument.load(req.body, { ignoreEncryption: true });
+      const total = src.getPageCount();
+      if (pages.some((p) => p > total)) {
+        return res.status(400).json({ ok: false, error: `The PDF has ${total} page(s).` });
+      }
+      const out = await PDFDocument.create();
+      const copied = await out.copyPages(src, pages.map((p) => p - 1));
+      copied.forEach((p) => out.addPage(p));
+      const bytes = Buffer.from(await out.save());
+      console.log(`Title split: ${pages.length} of ${total} page(s), ${Math.round(bytes.length / 1024)} KB`);
+      res.set("Content-Type", "application/pdf");
+      return res.send(bytes);
+    } catch (err) {
+      console.error("Title split error:", err?.message || err);
+      return res.status(422).json({ ok: false, error: "The PDF could not be split." });
+    }
+  });
+}
+
+// "3,4" or "3-5,7" → [3, 4] / [3, 4, 5, 7] (sorted, unique, 1-based); null when invalid.
+export function parsePages(header) {
+  if (!header || typeof header !== "string") return null;
+  const set = new Set();
+  for (const part of header.split(",")) {
+    const m = part.trim().match(/^(\d+)(?:-(\d+))?$/);
+    if (!m) return null;
+    const a = parseInt(m[1], 10);
+    const b = m[2] ? parseInt(m[2], 10) : a;
+    if (a < 1 || b < a || b - a > 500) return null;
+    for (let p = a; p <= b; p++) set.add(p);
+  }
+  return set.size ? [...set].sort((x, y) => x - y) : null;
 }
