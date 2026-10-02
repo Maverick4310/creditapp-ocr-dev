@@ -416,3 +416,11 @@ test("a file with several titles checks each vehicle on its own", () => {
   assert.equal(byPage(4).verdict, "fail");
   assert.ok(!byPage(2).problems.join(" ").includes("p4"), "no other document's problems");
 });
+
+// 2026-10 (Titling answers) Virginia: no lienholder section on the reassignment.
+test("a Virginia title without a lienholder on the reassignment is not flagged", () => {
+  const p = cleanPackage();
+  p.documents.find((d) => d.type === "title_back").assignments[0].new_lienholder = "";
+  assert.equal(status(runChecks(p, { ...EXPECTED, titlingState: "VA" }), "lienholder_on_assignment"), "na");
+  assert.equal(status(runChecks(p, { ...EXPECTED, titlingState: "TX" }), "lienholder_on_assignment"), "warn");
+});

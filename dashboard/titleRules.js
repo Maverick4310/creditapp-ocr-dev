@@ -329,10 +329,14 @@ export function runChecks(extraction, expected = {}) {
           unsigned.map((a) => where(a.doc)));
       }
       const named = last.new_lienholder;
+      // 2026-10 (Titling answers) Virginia reassignments have no lienholder section: Navitas goes on
+      // the title application, added after booking (Titling Manager, 2 Oct 2026).
+      const noLienSection = !named && stateOf(exp) === "VA";
       add("lienholder_on_assignment", `${exp.lienholder} is named as new lienholder` + tag,
-        !named ? "warn" : isNavitas(named) ? "pass" : broker ? "warn" : "fail",
-        !named ? "No new lienholder written on the last assignment (some states, e.g. VA, add it on the title application)."
-          : `New lienholder written: ${named}.`,
+        noLienSection ? "na" : !named ? "warn" : isNavitas(named) ? "pass" : broker ? "warn" : "fail",
+        noLienSection ? "Virginia reassignments have no lienholder section; Navitas goes on the title application after booking."
+          : !named ? "No new lienholder written on the last assignment (Navitas's lien is added after booking)."
+            : `New lienholder written: ${named}.`,
         [where(last.doc)]);
     }
   }
