@@ -157,8 +157,8 @@ export const TITLE_TOOL = {
 };
 
 export const TITLE_PROMPT = `
-You are reading vehicle titling documents for Navitas Credit Corp, an equipment finance
-company. Each file above may be a single document or a whole title package. Report EVERY
+You are reading vehicle titling documents for Navitas Credit LLC (formerly Navitas Credit
+Corp; older documents may still say Corp), an equipment finance company. Each file above may be a single document or a whole title package. Report EVERY
 document you find, in page order, by calling emit_title_package once.
 
 HOW TO SPLIT

@@ -13,7 +13,7 @@
 //   na   — the rule does not apply to what was uploaded
 //
 // expected (all optional): {
-//   dealNumber, customerName, vins: [], lienholder ("Navitas Credit Corp"),
+//   dealNumber, customerName, vins: [], lienholder ("Navitas Credit LLC"),
 //   referenceDate (YYYY-MM-DD, default today), payingOffLien, privateSale,
 //   insuranceRequired, docType (the slot a single file was uploaded to), cost,
 //   titlingState (two letters), titlingCounty, lienAdditionOnly   — 2026-10 (Titling answers)
