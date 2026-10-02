@@ -15,8 +15,24 @@
 // expected (all optional): {
 //   dealNumber, customerName, vins: [], lienholder ("Navitas Credit Corp"),
 //   referenceDate (YYYY-MM-DD, default today), payingOffLien, privateSale,
-//   insuranceRequired, docType (the slot a single file was uploaded to), cost
+//   insuranceRequired, docType (the slot a single file was uploaded to), cost,
+//   titlingState (two letters), titlingCounty, lienAdditionOnly   — 2026-10 (Titling answers)
 // }
+
+// 2026-10 (Titling answers) Title Department, 2 Oct 2026.
+// Insurance is required in these titling states (not on a lien addition only).
+export const INSURANCE_STATES = ["DC", "MN", "NC", "OR", "SC", "TN", "WV"];
+// One remotely notarized (DocuSign) buyer POA is enough, except in these states (originals only).
+export const ORIGINAL_POA_STATES = ["NC"];
+// The invoice or bill of sale must be signed by buyer and seller in these states (+ Broward County, FL).
+export const INVOICE_SIGNATURE_STATES = ["AR", "CO", "GA", "IN", "KY", "LA", "MD", "NE", "SC", "TX", "VA"];
+export const INVOICE_SIGNATURE_COUNTIES = { FL: ["BROWARD"] };
+// Florida's Coral Springs tag agency (Broward County) needs wet-ink POAs.
+export const WET_INK_POA_COUNTIES = { FL: ["BROWARD"] };
+
+const stateOf = (exp) => String(exp.titlingState || "").slice(0, 2).toUpperCase();
+const countyIn = (map, exp) => (map[stateOf(exp)] || [])
+  .includes(String(exp.titlingCounty || "").toUpperCase().replace(/\s+COUNTY$/, "").trim());
 
 const NOISE = new Set([
   "LLC", "L", "C", "INC", "INCORPORATED", "CORP", "CORPORATION", "CO", "COMPANY", "LTD",
@@ -123,7 +139,11 @@ const SLOT_TYPES = {
 
 export function runChecks(extraction, expected = {}) {
   const docs = (extraction && extraction.documents) || [];
-  const exp = { lienholder: "Navitas Credit Corp", ...expected };
+  const exp = { lienholder: "Navitas Credit LLC", ...expected };
+  // 2026-10 (Titling answers) Salesforce sends the titling state; an explicit flag still wins.
+  if (exp.insuranceRequired === undefined && exp.titlingState) {
+    exp.insuranceRequired = INSURANCE_STATES.includes(stateOf(exp)) && !exp.lienAdditionOnly;
+  }
   // "NAVITAS, 201 EXECUTIVE CENTER DR ..." is Navitas too.
   const isNavitas = (name) => sameName(nameOnly(name) || name, exp.lienholder) || /^NAVITAS/.test(nameKey(name));
   const today = exp.referenceDate || new Date().toISOString().slice(0, 10);
@@ -328,6 +348,22 @@ export function runChecks(extraction, expected = {}) {
       age === null ? "No invoice date could be read." : `Dated ${inv.document_date} (${age} day(s) old; 5 or fewer preferred).`,
       [where(inv)]);
 
+    // 2026-10 (Titling answers) Buyer and seller must sign the invoice or bill of sale in these states.
+    // The spreadsheet says DDI can sign for the buyer with the POA, so a missing buyer signature is a review.
+    if (!exp.lienAdditionOnly && (INVOICE_SIGNATURE_STATES.includes(stateOf(exp)) || countyIn(INVOICE_SIGNATURE_COUNTIES, exp))) {
+      const signed = invoices.filter((d) => d.type !== "auction_document");
+      const noSeller = signed.filter((d) => d.seller_signed === false);
+      const noBuyer = signed.filter((d) => d.buyer_signed === false);
+      const unread = signed.filter((d) => d.seller_signed == null || d.buyer_signed == null);
+      const where_ = exp.titlingCounty && countyIn(INVOICE_SIGNATURE_COUNTIES, exp) ? `${exp.titlingCounty} County, ${stateOf(exp)}` : stateOf(exp);
+      add("invoice_signed", `Invoice signed by buyer and seller (${where_})`,
+        noSeller.length ? "fail" : noBuyer.length || unread.length ? "warn" : "pass",
+        noSeller.length ? noSeller.map((d) => `${where(d)}: no seller signature`).join("; ")
+          : noBuyer.length ? noBuyer.map((d) => `${where(d)}: no buyer signature — DDI can sign for the buyer with the POA`).join("; ")
+            : unread.length ? "Signatures could not be read." : "Signed by buyer and seller.",
+        [...noSeller, ...noBuyer, ...unread].map(where));
+    }
+
     const buyer = exp.customerName || (efa && efa.customer_legal_name);
     if (buyer) {
       const bad = invoices.filter((d) => (nameOnly(d.sold_to) && !sameName(nameOnly(d.sold_to), buyer))
@@ -416,11 +452,23 @@ export function runChecks(extraction, expected = {}) {
     if (!exp.docType && broker && brokerPoas.length) {
       add("poa_count", "Broker POA to Navitas", "pass", `${brokerPoas.length} broker POA(s) granted to Navitas.`, brokerPoas.map(where));
     } else if (!exp.docType) {
-      add("poa_count", "Two buyer POAs", buyerPoas.length >= 2 ? "pass" : buyerPoas.length === 1 ? "warn" : "fail",
-        buyerPoas.length >= 2 ? `${buyerPoas.length} buyer POAs.`
-          : buyerPoas.length === 1 ? "One buyer POA. Two are required unless the Title Department accepts one remotely notarized POA."
-            : "No buyer POA found.",
+      // 2026-10 (Titling answers) One remotely notarized POA is enough; two if originals; NC originals only.
+      const originalsOnly = ORIGINAL_POA_STATES.includes(stateOf(exp));
+      const eBuyer = buyerPoas.filter((d) => d.remote_online_notarization);
+      const originals = buyerPoas.filter((d) => !d.remote_online_notarization);
+      const met = originalsOnly ? originals.length >= 2 : eBuyer.length > 0 || originals.length >= 2;
+      add("poa_count", originalsOnly ? "Two original buyer POAs (NC)" : "Buyer POA: one notarized online, or two originals",
+        met ? "pass" : "fail",
+        met ? (eBuyer.length && !originalsOnly ? `${eBuyer.length} buyer POA(s) notarized online.` : `${originals.length} original buyer POAs.`)
+          : originalsOnly && eBuyer.length ? `North Carolina takes original POAs only; ${eBuyer.length} notarized online, ${originals.length} original.`
+            : originals.length === 1 ? "One original buyer POA. Two originals are needed, or one notarized online."
+              : "No buyer POA found.",
         buyerPoas.map(where));
+      if (eBuyer.length && countyIn(WET_INK_POA_COUNTIES, exp)) {
+        add("poa_wet_ink", "Wet-ink POA for this county", "warn",
+          `${exp.titlingCounty} County (Coral Springs tag agency) does not accept DocuSign POAs; wet ink is needed if it goes there.`,
+          eBuyer.map(where));
+      }
       if (exp.privateSale) {
         add("seller_poa", "Seller POA on a private sale", sellerPoas.length ? "pass" : "fail",
           sellerPoas.length ? "Seller POA present." : "Private sale without a seller POA.", sellerPoas.map(where));

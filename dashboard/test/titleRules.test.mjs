@@ -37,15 +37,53 @@ test("names compare without punctuation or company suffixes", () => {
   assert.ok(!sameName("Acme Paving LLC", "Luna Landscape Corp"));
 });
 
-test("a clean package passes, with one POA left for review", () => {
+test("a clean package passes; its one remotely notarized POA is enough", () => {
   const r = runChecks(cleanPackage(), EXPECTED);
   for (const id of ["legible", "belongs_to_deal", "vin_match", "title_present", "title_back_present", "unreleased_liens",
     "chain_to_customer", "lienholder_on_assignment", "invoice_recent", "invoice_customer", "vendor_matches_pay_proceeds",
     "amount_financed_vs_invoice", "poa_notarized", "license_current"]) {
     assert.equal(status(r, id), "pass", id);
   }
-  assert.equal(status(r, "poa_count"), "warn");
-  assert.equal(r.verdict, "review");
+  // 2026-10 (Titling answers) One remotely notarized POA meets the requirement.
+  assert.equal(status(r, "poa_count"), "pass");
+});
+
+// 2026-10 (Titling answers) Title Department rules, 2 Oct 2026.
+const onePoa = (ron) => {
+  const p = cleanPackage();
+  p.documents.find((d) => d.type === "power_of_attorney").remote_online_notarization = ron;
+  return p;
+};
+test("one original POA is not enough; NC takes originals only", () => {
+  assert.equal(status(runChecks(onePoa(false), EXPECTED), "poa_count"), "fail");
+  assert.equal(status(runChecks(onePoa(true), { ...EXPECTED, titlingState: "NC" }), "poa_count"), "fail");
+  const nc = onePoa(false);
+  nc.documents.push(doc("power_of_attorney", [9], { contract_number: "41000001", vin: VIN, poa_role: "buyer", notarized: true,
+    signature_date: "2026-08-25", notary_date: "2026-08-25" }));
+  assert.equal(status(runChecks(nc, { ...EXPECTED, titlingState: "NC" }), "poa_count"), "pass");
+});
+test("warns that Broward County's tag agency needs wet-ink POAs", () => {
+  const r = runChecks(onePoa(true), { ...EXPECTED, titlingState: "FL", titlingCounty: "Broward" });
+  assert.equal(status(r, "poa_wet_ink"), "warn");
+  assert.equal(status(runChecks(onePoa(true), { ...EXPECTED, titlingState: "FL", titlingCounty: "Miami-Dade" }), "poa_wet_ink"), undefined);
+});
+test("checks invoice signatures only where the state requires them", () => {
+  const sign = (seller, buyer) => {
+    const p = cleanPackage();
+    Object.assign(p.documents.find((d) => d.type === "invoice"), { seller_signed: seller, buyer_signed: buyer });
+    return p;
+  };
+  assert.equal(status(runChecks(sign(true, true), { ...EXPECTED, titlingState: "TX" }), "invoice_signed"), "pass");
+  assert.equal(status(runChecks(sign(false, true), { ...EXPECTED, titlingState: "CO" }), "invoice_signed"), "fail");
+  assert.equal(status(runChecks(sign(true, false), { ...EXPECTED, titlingState: "GA" }), "invoice_signed"), "warn");
+  assert.equal(status(runChecks(sign(false, false), { ...EXPECTED, titlingState: "FL", titlingCounty: "Broward County" }), "invoice_signed"), "fail");
+  assert.equal(status(runChecks(sign(false, false), { ...EXPECTED, titlingState: "AZ" }), "invoice_signed"), undefined);
+  assert.equal(status(runChecks(sign(false, false), { ...EXPECTED, titlingState: "TX", lienAdditionOnly: true }), "invoice_signed"), undefined);
+});
+test("insurance follows the titling state unless Salesforce says otherwise", () => {
+  assert.equal(status(runChecks(cleanPackage(), { ...EXPECTED, titlingState: "WV" }), "insurance_present"), "fail");
+  assert.equal(status(runChecks(cleanPackage(), { ...EXPECTED, titlingState: "GA" }), "insurance_present"), undefined);
+  assert.equal(status(runChecks(cleanPackage(), { ...EXPECTED, titlingState: "NC", lienAdditionOnly: true }), "insurance_present"), undefined);
 });
 
 test("a misfiled package fails on contract number and VIN", () => {
