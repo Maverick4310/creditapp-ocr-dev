@@ -31,6 +31,19 @@ export const INVOICE_SIGNATURE_COUNTIES = { FL: ["BROWARD"] };
 export const WET_INK_POA_COUNTIES = { FL: ["BROWARD"] };
 
 const stateOf = (exp) => String(exp.titlingState || "").slice(0, 2).toUpperCase();
+// 2026-10 (Sales samples) "Maine" or "ME" → "ME", to compare a title application with the sheet.
+const STATE_NAMES = { ALABAMA: "AL", ALASKA: "AK", ARIZONA: "AZ", ARKANSAS: "AR", CALIFORNIA: "CA", COLORADO: "CO",
+  CONNECTICUT: "CT", DELAWARE: "DE", "DISTRICT OF COLUMBIA": "DC", FLORIDA: "FL", GEORGIA: "GA", HAWAII: "HI", IDAHO: "ID",
+  ILLINOIS: "IL", INDIANA: "IN", IOWA: "IA", KANSAS: "KS", KENTUCKY: "KY", LOUISIANA: "LA", MAINE: "ME", MARYLAND: "MD",
+  MASSACHUSETTS: "MA", MICHIGAN: "MI", MINNESOTA: "MN", MISSISSIPPI: "MS", MISSOURI: "MO", MONTANA: "MT", NEBRASKA: "NE",
+  NEVADA: "NV", "NEW HAMPSHIRE": "NH", "NEW JERSEY": "NJ", "NEW MEXICO": "NM", "NEW YORK": "NY", "NORTH CAROLINA": "NC",
+  "NORTH DAKOTA": "ND", OHIO: "OH", OKLAHOMA: "OK", OREGON: "OR", PENNSYLVANIA: "PA", "RHODE ISLAND": "RI",
+  "SOUTH CAROLINA": "SC", "SOUTH DAKOTA": "SD", TENNESSEE: "TN", TEXAS: "TX", UTAH: "UT", VERMONT: "VT", VIRGINIA: "VA",
+  WASHINGTON: "WA", "WEST VIRGINIA": "WV", WISCONSIN: "WI", WYOMING: "WY" };
+const stateCode = (s) => {
+  const t = String(s || "").toUpperCase().replace(/[^A-Z ]/g, " ").replace(/\s+/g, " ").trim();
+  return STATE_NAMES[t] || (/^[A-Z]{2}$/.test(t) ? t : "");
+};
 const countyIn = (map, exp) => (map[stateOf(exp)] || [])
   .includes(String(exp.titlingCounty || "").toUpperCase().replace(/\s+COUNTY$/, "").trim());
 
@@ -57,6 +70,11 @@ export function sameName(a, b) {
 }
 
 const vinKey = (v) => String(v || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+// 2026-10 (Sales samples) "1XP... / 5MA..." on a UCC-1 is two VINs, not one 34-character VIN.
+const docVins = (d) => {
+  const parts = String(d.vin || "").toUpperCase().split(/[\s,;/&+]+|\bAND\b/).map(vinKey).filter(Boolean);
+  return parts.length > 1 && parts.every((x) => x.length === 17) ? parts : vinKey(d.vin) ? [vinKey(d.vin)] : [];
+};
 
 // Characters that are easily confused when a VIN is handwritten or read from a poor scan.
 const LOOKALIKE = [["U", "V"], ["5", "S"], ["0", "O"], ["0", "D"], ["8", "B"], ["1", "I"], ["2", "Z"], ["6", "G"]];
@@ -99,8 +117,13 @@ function diffCount(a, b) {
 // For one document keep only its own segments, plus segments that name no document at all.
 const DOC_REF = /^[a-z_]+ \(file \d+, p[\d,]+\)/;
 function ownPart(detail, ref) {
-  const parts = String(detail || "").split("; ");
-  const kept = parts.filter((x) => x.startsWith(ref) || !DOC_REF.test(x));
+  // 2026-10 (Sales samples) A note can itself contain "; ". A piece without a document
+  // reference belongs to the document named before it, not to every document.
+  let owner = null;
+  const kept = String(detail || "").split("; ").filter((x) => {
+    if (DOC_REF.test(x)) owner = x.startsWith(ref) ? "mine" : "other";
+    return owner === null || owner === "mine";
+  });
   return kept.join("; ");
 }
 
@@ -183,7 +206,11 @@ export function runChecks(extraction, expected = {}) {
   // An unreadable DocuSign certificate or "other" page is worth a look, not a rejection.
   const SUPPORTING = ["notary_or_signing_certificate", "other", "other_addendum"];
   const unreadable = docs.filter((d) => d.legible === false);
-  const keyUnreadable = unreadable.filter((d) => !SUPPORTING.includes(d.type));
+  // 2026-10 (Sales samples) A scan the reader marks hard to read "but key fields are readable"
+  // (a watermark, a distorted copy) is for the analyst to look at, not a rejection.
+  const stillReadable = (d) => /(?<!\bun|\bnot |\bil)\b(readable|legible)\b/i.test(d.legibility_note || "")
+    && !/\b(unreadable|illegible|not (readable|legible))\b/i.test(d.legibility_note || "");
+  const keyUnreadable = unreadable.filter((d) => !SUPPORTING.includes(d.type) && !stillReadable(d));
   add("legible", "Every document is legible",
     docs.length === 0 || keyUnreadable.length ? "fail" : unreadable.length ? "warn" : "pass",
     docs.length === 0 ? "No document could be read."
@@ -210,9 +237,10 @@ export function runChecks(extraction, expected = {}) {
     // Each document VIN that is not on the deal is explained: Salesforce keyed wrong (its VIN fails
     // the check digit, the document's passes), a misread (the reverse, or look-alike characters),
     // or a different vehicle.
-    const off = withVin.filter((d) => !vins.includes(vinKey(d.vin)));
+    const offVin = (d) => docVins(d).find((v) => !vins.includes(v));
+    const off = withVin.filter((d) => offVin(d));
     const explain = (d) => {
-      const doc = vinKey(d.vin);
+      const doc = offVin(d);
       const close = vins.find((v) => diffCount(doc, v) <= 2);
       if (close && vinValid(doc) && !vinValid(close)) {
         return { status: "fail", text: `${where(d)}: ${d.vin}. The Salesforce VIN ${close} fails the VIN check digit and this one passes — correct the VIN in LeaseWorks.` };
@@ -220,10 +248,10 @@ export function runChecks(extraction, expected = {}) {
       if (close && (!vinValid(doc) && vinValid(close) || vinNear(doc, close))) {
         return { status: "warn", text: `${where(d)}: read as ${d.vin}, close to ${close} — likely a misread; check by eye.` };
       }
-      return { status: "fail", text: `${where(d)}: ${d.vin} is a different vehicle.` };
+      return { status: "fail", text: `${where(d)}: ${doc} is a different vehicle.` };
     };
     const found = off.map(explain);
-    off.forEach((d, i) => { vinVerdict[vinKey(d.vin)] = found[i].status === "fail" && /different vehicle/.test(found[i].text) ? "different" : "explained"; });
+    off.forEach((d, i) => { vinVerdict[offVin(d)] = found[i].status === "fail" && /different vehicle/.test(found[i].text) ? "different" : "explained"; });
     add("vin_match", "VIN matches the vehicle",
       withVin.length === 0 ? "warn" : found.some((f) => f.status === "fail") ? "fail" : found.length ? "warn" : "pass",
       withVin.length === 0 ? "No VIN could be read."
@@ -234,6 +262,21 @@ export function runChecks(extraction, expected = {}) {
     const distinct = [...new Set(withVin.map((d) => vinKey(d.vin)))];
     add("vin_consistent", "Same VIN on every document", distinct.length === 1 ? "pass" : "warn",
       distinct.length === 1 ? `VIN ${distinct[0]}.` : `Different VINs: ${distinct.join(", ")}.`, withVin.map(where));
+  }
+
+  // 2026-10 (Sales samples) The title application names the state the vehicle is being titled in.
+  // One for another state means the sheet's titling state is out of date (or a vehicle is titled elsewhere).
+  if (stateOf(exp)) {
+    const apps = of("title_application").filter((d) => stateCode(d.title_state));
+    const elsewhere = apps.filter((d) => stateCode(d.title_state) !== stateOf(exp));
+    if (apps.length) {
+      add("titling_state_matches", `Title application is for the sheet's titling state (${stateOf(exp)})`,
+        elsewhere.length ? "warn" : "pass",
+        elsewhere.length ? elsewhere.map((d) => `${where(d)}: ${stateCode(d.title_state)} application`).join("; ")
+          + ` — the sheet says ${stateOf(exp)}. Update the sheet's titling state, or confirm the vehicle is titled there.`
+          : `${apps.length} title application(s) for ${stateOf(exp)}.`,
+        elsewhere.map(where));
+    }
   }
 
   // ── Title: no title, no review ────────────────────────────────────────
@@ -391,9 +434,12 @@ export function runChecks(extraction, expected = {}) {
         [where(inv), where(efa)]);
     }
 
-    // Sum distinct invoice totals (copies of the same invoice count once). Financing more than the
+    // Sum invoice totals; copies of the same invoice (same VIN and total) count once. Two trucks
+    // at the same price are two invoices (2026-10, Sales samples). Financing more than the
     // invoice is normal when taxes, fees or other equipment are financed — review, not a failure.
-    const totals = [...new Set(invoices.map((d) => d.total_amount).filter((n) => n != null))];
+    const byInvoice = new Map();
+    invoices.filter((d) => d.total_amount != null).forEach((d) => byInvoice.set(`${docVins(d).join(",")}|${d.total_amount}`, d.total_amount));
+    const totals = [...byInvoice.values()];
     const invoiceTotal = totals.reduce((a, b) => a + b, 0);
     if (efa && efa.amount_financed != null && totals.length) {
       const diff = Math.round((invoiceTotal - efa.amount_financed) * 100) / 100;
@@ -448,7 +494,7 @@ export function runChecks(extraction, expected = {}) {
         bad.map(where));
       if (vins.length) {
         // Only a POA for another vehicle fails here; keyed-wrong or misread VINs are reported by vin_match.
-        const wrongVin = poas.filter((d) => vinKey(d.vin) && !vins.includes(vinKey(d.vin)) && vinVerdict[vinKey(d.vin)] !== "explained");
+        const wrongVin = poas.filter((d) => docVins(d).some((v) => !vins.includes(v) && vinVerdict[v] !== "explained"));
         if (wrongVin.length) add("poa_vin", "POA lists this vehicle's VIN", "fail",
           wrongVin.map((d) => `${where(d)}: ${d.vin}`).join("; "), wrongVin.map(where));
       }
@@ -495,7 +541,11 @@ export function runChecks(extraction, expected = {}) {
 
   // ── Insurance ────────────────────────────────────────────────────────
   const insurance = of("insurance");
-  if (insurance.length) {
+  if (insurance.length && exp.insuranceRequired === false) {
+    // 2026-10 (Sales samples) Insurance is not required in this state: a certificate in the package is not checked.
+    add("insurance_not_required", `Proof of insurance (not required in ${stateOf(exp) || "this state"})`, "na",
+      "Insurance is not required for this titling state, so the certificate is not checked.", []);
+  } else if (insurance.length) {
     const ins = insurance[0];
     add("insurance_loss_payee", `${exp.lienholder} is loss payee`,
       ins.loss_payee && isNavitas(ins.loss_payee) ? "pass" : "fail",

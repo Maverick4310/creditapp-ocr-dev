@@ -170,12 +170,21 @@ HOW TO SPLIT
 - An electronic title printout that says "THIS IS NOT A TITLE" (e.g. Premier eTitleLien)
   is electronic_title_copy.
 - A Retail Sales Order or Buyer's Order that prices the vehicle is an invoice.
+- invoice is only a document that sells the vehicle or equipment. A referral, broker or
+  origination fee invoice is other.
+- insurance is only a certificate, declarations page or policy. An insurance authorization
+  or request form (asking the agent to add Navitas) is other.
+- title_application: put the state the application is filed in (the new titling state) in
+  title_state.
 
 LEGIBILITY
 - legible=false only when you cannot read the facts this document is for (VIN, names,
   dates, amounts, signatures) with confidence. Explain in legibility_note. Blurry
-  background art or a watermark alone is not illegible.
+  background art or a watermark alone is not illegible. If the key facts can still be read
+  despite a watermark or a poor scan, legible=true and say what is hard to read in notes.
 - A form that is blank or partly blank is LEGIBLE (you can read it); say it is blank in notes.
+- Do not note blank Navitas / Secured Party / Lessor signature or acceptance lines: Navitas
+  signs at booking. Do note blanks the customer, seller or vendor should have filled in.
 - Read pages that are rotated or upside down; only call them illegible if the text itself
   cannot be read.
 

@@ -424,3 +424,60 @@ test("a Virginia title without a lienholder on the reassignment is not flagged",
   assert.equal(status(runChecks(p, { ...EXPECTED, titlingState: "VA" }), "lienholder_on_assignment"), "na");
   assert.equal(status(runChecks(p, { ...EXPECTED, titlingState: "TX" }), "lienholder_on_assignment"), "warn");
 });
+
+// 2026-10 (Sales samples) Fixes from three real sales packages (Oct 2026). Invented data.
+test("insurance is not checked in a state that does not require it", () => {
+  const p = cleanPackage();
+  p.documents.push(doc("insurance", [16], { loss_payee: null }));
+  const ok = runChecks(p, { ...EXPECTED, titlingState: "OK" });
+  assert.equal(status(ok, "insurance_loss_payee"), undefined);
+  assert.equal(status(ok, "insurance_not_required"), "na");
+  assert.equal(status(runChecks(p, { ...EXPECTED, titlingState: "NC" }), "insurance_loss_payee"), "fail");
+});
+
+test("two trucks at the same price are two invoices; copies of one invoice count once", () => {
+  const V2 = "1FTFW1E50NFA00002";
+  const p = cleanPackage();
+  p.documents.find((d) => d.type === "invoice").vin = VIN;
+  p.documents.find((d) => d.type === "equipment_finance_agreement").amount_financed = 183800;
+  p.documents.push(doc("invoice", [9], { vendor_name: "Desert Truck Centers of Arizona Inc", sold_to: "Acme Paving LLC",
+    document_date: "2026-08-28", total_amount: 91900, vin: V2 }));
+  p.documents.push(doc("invoice", [10], { vendor_name: "Desert Truck Centers of Arizona Inc", sold_to: "Acme Paving LLC",
+    document_date: "2026-08-28", total_amount: 91900, vin: V2 }));
+  assert.equal(status(runChecks(p, { ...EXPECTED, vins: [VIN, V2] }), "amount_financed_vs_invoice"), "pass");
+});
+
+test("a watermarked title whose facts were read is reviewed, not failed", () => {
+  const p = cleanPackage();
+  const back = p.documents.find((d) => d.type === "title_back");
+  back.legible = false;
+  back.legibility_note = "Watermark makes the text hard to verify, but key fields are readable";
+  assert.equal(status(runChecks(p, EXPECTED), "legible"), "warn");
+  back.legibility_note = "Watermark; the buyer name is not readable";
+  assert.equal(status(runChecks(p, EXPECTED), "legible"), "fail");
+});
+
+test("a UCC-1 listing both of the deal's VINs is not a different vehicle", () => {
+  const V2 = "1FTFW1E50NFA00002";
+  const p = cleanPackage();
+  p.documents.push(doc("other", [20], { vin: `${VIN} / ${V2}` }));
+  assert.equal(status(runChecks(p, { ...EXPECTED, vins: [VIN, V2] }), "vin_match"), "pass");
+  assert.equal(status(runChecks(p, EXPECTED), "vin_match"), "fail");
+});
+
+test("a note containing '; ' stays with its own document", () => {
+  const p = cleanPackage();
+  p.documents.find((d) => d.type === "invoice").notes = ["Guaranty section blank; ship-to is a street address"];
+  const r = runChecks(p, EXPECTED);
+  const poa = r.documents.find((d) => d.type === "power_of_attorney");
+  const inv = r.documents.find((d) => d.type === "invoice");
+  assert.ok(!poa.problems.join(" ").includes("ship-to"), "POA does not inherit the invoice note");
+  assert.ok(inv.problems.join(" ").includes("ship-to is a street address"));
+});
+
+test("a title application for another state flags the sheet's titling state", () => {
+  const p = cleanPackage();
+  p.documents.push(doc("title_application", [21], { vin: VIN, title_state: "Maine" }));
+  assert.equal(status(runChecks(p, { ...EXPECTED, titlingState: "NY" }), "titling_state_matches"), "warn");
+  assert.equal(status(runChecks(p, { ...EXPECTED, titlingState: "ME" }), "titling_state_matches"), "pass");
+});
