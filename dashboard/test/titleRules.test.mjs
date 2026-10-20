@@ -481,3 +481,16 @@ test("a title application for another state flags the sheet's titling state", ()
   assert.equal(status(runChecks(p, { ...EXPECTED, titlingState: "NY" }), "titling_state_matches"), "warn");
   assert.equal(status(runChecks(p, { ...EXPECTED, titlingState: "ME" }), "titling_state_matches"), "pass");
 });
+
+test("an invoice billed to Navitas fails and tells the rep to get it reissued", () => {
+  const p = cleanPackage();
+  p.documents.find((d) => d.type === "invoice").sold_to = "Navitas Credit Corp";
+  const c = runChecks(p, EXPECTED).checks.find((x) => x.id === "invoice_customer");
+  assert.equal(c.status, "fail");
+  assert.match(c.detail, /Ask the vendor to reissue/);
+  const q = cleanPackage();
+  q.documents.find((d) => d.type === "invoice").sold_to = "Luna Landscape Corp";
+  const other = runChecks(q, EXPECTED).checks.find((x) => x.id === "invoice_customer");
+  assert.equal(other.status, "fail");
+  assert.doesNotMatch(other.detail, /reissue/);
+});

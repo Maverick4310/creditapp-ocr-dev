@@ -415,8 +415,11 @@ export function runChecks(extraction, expected = {}) {
     if (buyer) {
       const bad = invoices.filter((d) => (nameOnly(d.sold_to) && !sameName(nameOnly(d.sold_to), buyer))
         || (nameOnly(d.ship_to) && !sameName(nameOnly(d.ship_to), buyer)));
+      // 2026-10 (Titling ruling) Never billed to Navitas: titled equipment is on security agreements, not leases.
+      const toNavitas = bad.some((d) => isNavitas(d.sold_to || "") || isNavitas(d.ship_to || ""));
       add("invoice_customer", "Invoice Sold To and Ship To are the customer", bad.length ? "fail" : "pass",
-        bad.length ? bad.map((d) => `${where(d)}: sold to ${d.sold_to || "?"}, ship to ${d.ship_to || "?"}`).join("; ")
+        bad.length ? bad.map((d) => `${where(d)}: sold to ${d.sold_to || "?"}, ship to ${d.ship_to || "?"}`).join("; ") +
+          (toNavitas ? ". Invoices must be in the customer's name; Navitas uses security agreements, not leases, for titled equipment. Ask the vendor to reissue." : "")
           : `Matches ${buyer}.`, bad.map(where));
     }
 
