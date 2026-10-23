@@ -15,7 +15,7 @@ function cleanPackage() {
       doc("title_information_sheet", [1], { contract_number: "41000001", vin: VIN }),
       doc("title_front", [2], { vin: VIN, owner_names: ["Desert Truck Centers of Arizona Inc"], lienholders: [] }),
       doc("title_back", [3], { assignments: [{ seller_name: "DESERT TRUCK CENTERS OF ARIZONA INC", buyer_name: "ACME PAVING LLC",
-        new_lienholder: "NAVITAS CREDIT CORP", seller_signed: true, sale_date: "2026-08-28" }] }),
+        new_lienholder: "NAVITAS CREDIT CORP", seller_signed: true, sale_date: "2026-08-28", odometer: "41200" }] }),
       doc("power_of_attorney", [4], { contract_number: "41000001", vin: VIN, poa_role: "buyer", notarized: true,
         remote_online_notarization: true, signature_date: "2026-08-25", notary_date: "2026-08-25" }),
       doc("notary_or_signing_certificate", [5, 6]),
@@ -402,9 +402,9 @@ test("a file with several titles checks each vehicle on its own", () => {
   const V2 = "1FTFW1E50NFA00002";
   const extraction = { documents: [
     doc("title_front", [1], { vin: V1, owner_names: ["Seller One"], lienholders: [] }),
-    doc("title_back", [2], { assignments: [{ seller_name: "Seller One", buyer_name: "Acme Paving LLC", seller_signed: true, new_lienholder: "Navitas Credit Corp" }] }),
+    doc("title_back", [2], { assignments: [{ seller_name: "Seller One", buyer_name: "Acme Paving LLC", seller_signed: true, new_lienholder: "Navitas Credit Corp", odometer: "1200" }] }),
     doc("title_front", [3], { vin: V2, owner_names: ["Seller Two"], lienholders: [] }),
-    doc("reassignment_form", [4], { assignments: [{ seller_name: "Seller Two", buyer_name: "Someone Else Inc", seller_signed: true }] }),
+    doc("reassignment_form", [4], { assignments: [{ seller_name: "Seller Two", buyer_name: "Someone Else Inc", seller_signed: true, odometer: "900" }] }),
   ] };
   const r = runChecks(extraction, { customerName: "Acme Paving LLC", vins: [V1, V2] });
   const chains = r.checks.filter((c) => c.id === "chain_to_customer");
@@ -510,4 +510,63 @@ test("a real problem note on a POA is still surfaced", () => {
   p.documents.push(doc("power_of_attorney", [9], { notes: ["Different contract number written in"] }));
   const r = runChecks(p, EXPECTED);
   assert.equal(status(r, "analyst_notes"), "warn");
+});
+
+// ── Titling Manager testing, 23 Oct 2026: checks that need no sign-off ───
+test("Navitas in the title's lienholder box counts when the assignment's box is blank", () => {
+  const p = cleanPackage();
+  p.documents.find((d) => d.type === "title_back").assignments[0].new_lienholder = null;
+  p.documents.find((d) => d.type === "title_front").lienholders = [
+    { name: "Navitas Credit Corp.", address: "201 Executive Center Drive, Suite 100 Columbia, SC 29210" }];
+  const r = runChecks(p, EXPECTED);
+  assert.equal(status(r, "lienholder_on_assignment"), "pass");
+  assert.equal(status(r, "lienholder_address"), "pass");
+  assert.equal(status(r, "unreleased_liens"), "pass", "Navitas is not someone else's lien");
+});
+
+test("Navitas's address missing Center goes to review", () => {
+  const p = cleanPackage();
+  p.documents.find((d) => d.type === "title_back").assignments[0].new_lienholder_address = "201 Executive Dr Ste 100 Columbia, SC 29210";
+  const r = runChecks(p, EXPECTED);
+  assert.equal(status(r, "lienholder_address"), "warn");
+  assert.match(r.checks.find((c) => c.id === "lienholder_address").detail, /201 Executive Center Dr/);
+});
+
+test("a lienholder with no address written skips the address check", () => {
+  const r = runChecks(cleanPackage(), EXPECTED);
+  assert.equal(status(r, "lienholder_address"), undefined);
+});
+
+test("an assignment with no odometer reading goes to review; EXEMPT counts", () => {
+  const p = cleanPackage();
+  const back = p.documents.find((d) => d.type === "title_back");
+  back.assignments = [
+    { seller_name: "RENTAL CO", buyer_name: "DESERT TRUCK CENTERS OF ARIZONA INC", seller_signed: true, odometer: null },
+    { ...back.assignments[0], odometer: "48939" },
+  ];
+  assert.equal(status(runChecks(p, EXPECTED), "assignment_odometer"), "warn");
+  back.assignments[0].odometer = "EXEMPT";
+  assert.equal(status(runChecks(p, EXPECTED), "assignment_odometer"), undefined);
+});
+
+test("a down payment on the invoice that covers the gap passes", () => {
+  const p = cleanPackage();
+  const inv = p.documents.find((d) => d.type === "invoice");
+  inv.total_amount = 71241.25;
+  inv.down_payment = 30545.05;
+  p.documents.find((d) => d.type === "equipment_finance_agreement").amount_financed = 40696.70;
+  assert.equal(status(runChecks(p, EXPECTED), "amount_financed_vs_invoice"), "pass");
+  inv.down_payment = null;
+  inv.balance_due = 40696.70;
+  assert.equal(status(runChecks(p, EXPECTED), "amount_financed_vs_invoice"), "pass", "the printed balance due matches");
+  inv.balance_due = null;
+  assert.equal(status(runChecks(p, EXPECTED), "amount_financed_vs_invoice"), "warn", "no down payment shown: still a question");
+});
+
+test("a driver's license the reader found hard to make out goes to review", () => {
+  const p = cleanPackage();
+  p.documents.find((d) => d.type === "drivers_license").legibility_note = "Photo and name are blurry";
+  const r = runChecks(p, EXPECTED);
+  assert.equal(status(r, "license_legible"), "warn");
+  assert.equal(status(r, "license_current"), "pass");
 });

@@ -77,7 +77,8 @@ export const TITLE_TOOL = {
               type: "array",
               items: {
                 type: "object",
-                properties: { name: { type: "string" }, released: bool, release_evidence: str },
+                // 2026-10 (Titling testing 23 Oct) address as written, to check Navitas's address.
+                properties: { name: { type: "string" }, address: str, released: bool, release_evidence: str },
                 required: ["name"],
               },
             },
@@ -91,8 +92,9 @@ export const TITLE_TOOL = {
                   buyer_name: str,
                   buyer_address: str,
                   sale_date: str,
-                  odometer: str,
+                  odometer: { type: ["string", "null"], description: "Reading written on THIS assignment; \"EXEMPT\" if marked exempt; null if left blank" },
                   new_lienholder: str,
+                  new_lienholder_address: str,
                   seller_signed: bool,
                   buyer_signed: bool,
                 },
@@ -104,6 +106,9 @@ export const TITLE_TOOL = {
             ship_to: str,
             document_date: { type: ["string", "null"], description: "YYYY-MM-DD" },
             total_amount: num,
+            // 2026-10 (Titling testing 23 Oct) a down payment explains an invoice above the amount financed.
+            down_payment: { type: ["number", "null"], description: "Down payment, deposit or trade-in credit shown on the invoice (total credit before the balance due)" },
+            balance_due: { type: ["number", "null"], description: "Balance due / amount owed after credits, as printed" },
             is_auction: bool,
             seller_signed: bool,
             buyer_signed: bool,
@@ -183,6 +188,8 @@ LEGIBILITY
   background art or a watermark alone is not illegible. If the key facts can still be read
   despite a watermark or a poor scan, legible=true and say what is hard to read in notes.
 - A form that is blank or partly blank is LEGIBLE (you can read it); say it is blank in notes.
+- Driver's license: if the name, photo or expiration date is blurry, faded or hard to make out,
+  say what in legibility_note, even when you could still read it.
 - Do not note blank Navitas / Secured Party / Lessor signature or acceptance lines: Navitas
   signs at booking. Do note blanks the customer, seller or vendor should have filled in.
 - Read pages that are rotated or upside down; only call them illegible if the text itself
@@ -202,7 +209,11 @@ WHAT TO COPY
   sets no_liens_stated=true and has no lienholders.
 - Assignments: include every filled-in assignment/reassignment on the title back or a
   reassignment form, earliest first. new_lienholder is what is written in the
-  "new lienholder" box on that assignment (null when the form has no such box or it is blank).
+  "new lienholder" box on that assignment (null when the form has no such box or it is blank),
+  and new_lienholder_address its address exactly as written. odometer is the reading written on
+  THAT assignment only; null when its odometer line is blank, even if another assignment has one.
+- Lienholder boxes ("1st lien in favor of ... whose address is ...") on a title, MSO or
+  reassignment form go in lienholders, with the address exactly as written (do not correct it).
 - POA: poa_owner_name is the vehicle owner named on the POA (the grantor). poa_role is
   "seller" only when that owner is the party SELLING the vehicle (the prior owner); when the
   owner is the customer being financed, it is "buyer". notarized=true when a notary seal/stamp and notary signature are

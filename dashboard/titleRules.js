@@ -183,6 +183,12 @@ export function runChecks(extraction, expected = {}) {
   }
   // "NAVITAS, 201 EXECUTIVE CENTER DR ..." is Navitas too.
   const isNavitas = (name) => sameName(nameOnly(name) || name, exp.lienholder) || /^NAVITAS/.test(nameKey(name));
+  // 2026-10 (Titling testing 23 Oct) Navitas's lienholder address, word by word; "201 Executive Dr" is wrong.
+  const navitasAddressOk = (text) => {
+    const t = " " + String(text || "").toUpperCase().replace(/[^A-Z0-9]+/g, " ") + " ";
+    return / 201 /.test(t) && / EXECUTIVE CENTER /.test(t) && / (DR|DRIVE) /.test(t) && / (STE|SUITE|#)? ?100 /.test(t)
+      && / COLUMBIA /.test(t) && / (SC|SOUTH CAROLINA) /.test(t) && / 29210 /.test(t);
+  };
   const today = exp.referenceDate || new Date().toISOString().slice(0, 10);
   const of = (...types) => docs.filter((d) => types.includes(d.type));
   const checks = [];
@@ -385,16 +391,37 @@ export function runChecks(extraction, expected = {}) {
           unsigned.map((a) => `${a.seller_name || "seller"} → ${a.buyer_name || "buyer"} not signed`).join("; "),
           unsigned.map((a) => where(a.doc)));
       }
+      // 2026-10 (Titling testing 23 Oct) Every assignment carries an odometer reading ("EXEMPT" counts);
+      // the same reading on two assignments is fine. Review, not a failure, until Titling signs off.
+      const noOdometer = assignments.filter((a) => !String(a.odometer || "").trim());
+      if (noOdometer.length) {
+        add("assignment_odometer", "Every assignment shows an odometer reading" + tag, "warn",
+          noOdometer.map((a) => `${a.seller_name || "seller"} → ${a.buyer_name || "buyer"}: no odometer reading`).join("; "),
+          noOdometer.map((a) => where(a.doc)));
+      }
       const named = last.new_lienholder;
+      // 2026-10 (Titling testing 23 Oct) Navitas written in a lienholder box ("1st lien in favor of") on the
+      // title, MSO or reassignment counts too (41444028 had it there, not on the assignment).
+      const boxLien = !named && [...gTitles, ...gBacks, ...gE].flatMap((d) => (d.lienholders || []).map((l) => ({ ...l, doc: d })))
+        .find((l) => l.name && isNavitas(l.name));
       // 2026-10 (Titling answers) Virginia reassignments have no lienholder section: Navitas goes on
       // the title application, added after booking (Titling Manager, 2 Oct 2026).
-      const noLienSection = !named && stateOf(exp) === "VA";
+      const noLienSection = !named && !boxLien && stateOf(exp) === "VA";
       add("lienholder_on_assignment", `${exp.lienholder} is named as new lienholder` + tag,
-        noLienSection ? "na" : !named ? "warn" : isNavitas(named) ? "pass" : broker ? "warn" : "fail",
+        noLienSection ? "na" : boxLien ? "pass" : !named ? "warn" : isNavitas(named) ? "pass" : broker ? "warn" : "fail",
         noLienSection ? "Virginia reassignments have no lienholder section; Navitas goes on the title application after booking."
-          : !named ? "No new lienholder written on the last assignment (Navitas's lien is added after booking)."
-            : `New lienholder written: ${named}.`,
-        [where(last.doc)]);
+          : boxLien ? `${boxLien.name} is written in the lienholder box (${where(boxLien.doc)}).`
+            : !named ? "No new lienholder written on the last assignment (Navitas's lien is added after booking)."
+              : `New lienholder written: ${named}.`,
+        [where(boxLien ? boxLien.doc : last.doc)]);
+      // 2026-10 (Titling testing 23 Oct) Navitas's address as written, where one was written.
+      const written = boxLien ? boxLien.address : named && isNavitas(named) ? (last.new_lienholder_address || named) : null;
+      if (written && /\d/.test(written)) {
+        const ok = navitasAddressOk(written);
+        add("lienholder_address", `${exp.lienholder}'s address is correct` + tag, ok ? "pass" : "warn",
+          ok ? `${written}.` : `Written: ${written}. Expected 201 Executive Center Dr, Suite 100, Columbia, SC 29210.`,
+          [where(boxLien ? boxLien.doc : last.doc)]);
+      }
     }
   }
 
@@ -461,9 +488,17 @@ export function runChecks(extraction, expected = {}) {
     if (efa && efa.amount_financed != null && totals.length) {
       const diff = Math.round((invoiceTotal - efa.amount_financed) * 100) / 100;
       const fmt = (n) => "$" + n.toLocaleString();
+      // 2026-10 (Titling testing 23 Oct) A down payment on the invoice that covers the gap (within $5,
+      // or the printed balance due equals the amount financed) is correct (41458567).
+      const down = invoices.reduce((n, d) => n + (Number(d.down_payment) || 0), 0);
+      const balances = invoices.map((d) => d.balance_due).filter((x) => x != null);
+      const byDown = diff > 0 && down > 0 && Math.abs(diff - down) <= 5;
+      const byBalance = diff > 0 && balances.length === invoices.length
+        && Math.abs(balances.reduce((a, b) => a + b, 0) - efa.amount_financed) <= 5;
       add("amount_financed_vs_invoice", "Amount financed matches the invoice",
-        diff === 0 ? "pass" : "warn",
+        diff === 0 || byDown || byBalance ? "pass" : "warn",
         diff === 0 ? `${fmt(efa.amount_financed)}.`
+          : byDown || byBalance ? `Invoice ${fmt(invoiceTotal)} less the down payment ${fmt(down || diff)} matches ${fmt(efa.amount_financed)} financed.`
           : diff > 0 ? `Invoice ${fmt(invoiceTotal)} is ${fmt(diff)} more than financed — a down payment?`
             : `Financed ${fmt(efa.amount_financed)} is ${fmt(-diff)} more than the invoice ${fmt(invoiceTotal)} — taxes, fees or other equipment financed?`,
         [...invoices.map(where), where(efa)]);
@@ -554,6 +589,13 @@ export function runChecks(extraction, expected = {}) {
         : unknown.length ? "Expiration date could not be read."
           : licenses.map((d) => `${d.license_state || ""} expires ${d.license_expiration}`).join("; "),
       [...expired, ...unknown].map(where));
+    // 2026-10 (Titling testing 23 Oct) A license the reader says is hard to make out goes to review
+    // (41444028 passed while barely legible).
+    const blurry = licenses.filter((d) => d.legible !== false && String(d.legibility_note || "").trim());
+    if (blurry.length) {
+      add("license_legible", "Driver's license is clearly readable", "warn",
+        blurry.map((d) => `${where(d)}: ${d.legibility_note}`).join("; "), blurry.map(where));
+    }
   }
 
   // ── Insurance ────────────────────────────────────────────────────────
