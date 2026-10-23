@@ -160,8 +160,22 @@ const SLOT_TYPES = {
   "POA - Seller": ["power_of_attorney"],
 };
 
+// 2026-10 (Titling testing 23 Oct) Notes the Titling Manager confirmed are normal, so they never send a
+// document to review: the "previous owner" line some titles print, a second POA (two originals are often
+// required), and the same odometer reading on more than one assignment.
+const NORMAL_NOTES = [
+  { types: null, re: /\b(previous|prior) owner/i },
+  { types: ["power_of_attorney"], re: /\b(duplicate|second|2nd|another copy)\b/i },
+  { types: ["title_front", "title_back", "mso", "reassignment_form", "title_application"],
+    re: /odometer.*\b(same|duplicat\w*|identical|matching)\b|\b(same|duplicat\w*|identical|matching)\b.*odometer/i },
+];
+const normalNote = (type, n) => NORMAL_NOTES.some((x) => (!x.types || x.types.includes(type)) && x.re.test(n));
+
 export function runChecks(extraction, expected = {}) {
   const docs = (extraction && extraction.documents) || [];
+  for (const d of docs) {
+    if (d.notes) d.notes = d.notes.filter((n) => !normalNote(d.type, n));
+  }
   const exp = { lienholder: "Navitas Credit LLC", ...expected };
   // 2026-10 (Titling answers) Salesforce sends the titling state; an explicit flag still wins.
   if (exp.insuranceRequired === undefined && exp.titlingState) {

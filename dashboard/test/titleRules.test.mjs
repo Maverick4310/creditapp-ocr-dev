@@ -494,3 +494,20 @@ test("an invoice billed to Navitas fails and tells the rep to get it reissued", 
   assert.equal(other.status, "fail");
   assert.doesNotMatch(other.detail, /reissue/);
 });
+
+// ── Titling Manager testing, 23 Oct 2026 ─────────────────────────────────
+test("normal notes (previous owner, second POA, same odometer) do not send a document to review", () => {
+  const p = cleanPackage();
+  const title = p.documents.find((d) => d.type === "title_front" || d.type === "mso" || d.type === "title_back");
+  title.notes = ["Previous owner listed as a rental company", "Odometer disclosure duplicated on both assignment blocks with same reading"];
+  p.documents.push(doc("power_of_attorney", [9], { notes: ["Duplicate second signed POA, as required by 2-POA checklist item"] }));
+  const r = runChecks(p, EXPECTED);
+  assert.equal(status(r, "analyst_notes"), undefined, JSON.stringify(r.checks.find((c) => c.id === "analyst_notes")));
+});
+
+test("a real problem note on a POA is still surfaced", () => {
+  const p = cleanPackage();
+  p.documents.push(doc("power_of_attorney", [9], { notes: ["Different contract number written in"] }));
+  const r = runChecks(p, EXPECTED);
+  assert.equal(status(r, "analyst_notes"), "warn");
+});

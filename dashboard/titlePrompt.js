@@ -215,6 +215,8 @@ WHAT TO COPY
   printed on the EFA (the "Federal Tax ID#" box); customer_street/city/state/zip is the
   borrower address; equipment_location only when a separate equipment location is given.
 - Title: body_type, color, odometer, weights and axles only when printed on the title.
+- Title owner_names: the CURRENT owner(s) only. Some titles also print a "previous owner" line;
+  never copy it into owner_names and never note it.
 - Insurance: loss_payee exactly as written; limits as numbers; insurer is the carrier
   (the INSURER row on an ACORD certificate); policy_number as printed.
 
@@ -229,6 +231,8 @@ NOTES — anomalies only
   missing, an odometer discrepancy box ticked, an auction or consignment sale, a date that
   looks wrong. At most 3 per document, one short sentence each.
 - Do NOT summarise the document, restate fields you already filled, or note things that are
-  normal (blank unused reassignment sections, DocuSign details, terms and conditions).
+  normal (blank unused reassignment sections, DocuSign details, terms and conditions, the
+  "previous owner" line on a title, a second POA that matches the first (two originals are
+  often required), the same odometer reading on more than one assignment).
   Leave notes empty when nothing is wrong.
 `.trim();
