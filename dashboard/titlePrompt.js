@@ -38,6 +38,8 @@ export const DOC_TYPES = [
 const str = { type: ["string", "null"] };
 const num = { type: ["number", "null"] };
 const bool = { type: ["boolean", "null"] };
+// 2026-10 (UCB call, 41708906) A handwritten "201" was read as 401; the reader says when it is unsure.
+const addrClear = { type: ["boolean", "null"], description: "false when the address is handwritten or faint and you are not sure of every number and word" };
 
 export const TITLE_TOOL = {
   name: "emit_title_package",
@@ -78,7 +80,7 @@ export const TITLE_TOOL = {
               items: {
                 type: "object",
                 // 2026-10 (Titling testing 23 Oct) address as written, to check Navitas's address.
-                properties: { name: { type: "string" }, address: str, released: bool, release_evidence: str },
+                properties: { name: { type: "string" }, address: str, address_clear: addrClear, released: bool, release_evidence: str },
                 required: ["name"],
               },
             },
@@ -95,6 +97,7 @@ export const TITLE_TOOL = {
                   odometer: { type: ["string", "null"], description: "Reading written on THIS assignment; \"EXEMPT\" if marked exempt; null if left blank" },
                   new_lienholder: str,
                   new_lienholder_address: str,
+                  new_lienholder_address_clear: addrClear,
                   seller_signed: bool,
                   buyer_signed: bool,
                 },
@@ -214,6 +217,8 @@ WHAT TO COPY
   THAT assignment only; null when its odometer line is blank, even if another assignment has one.
 - Lienholder boxes ("1st lien in favor of ... whose address is ...") on a title, MSO or
   reassignment form go in lienholders, with the address exactly as written (do not correct it).
+- Handwritten addresses: copy what you can read, but set address_clear (or
+  new_lienholder_address_clear) to false when any number or word is uncertain. Never guess a digit.
 - POA: poa_owner_name is the vehicle owner named on the POA (the grantor). poa_role is
   "seller" only when that owner is the party SELLING the vehicle (the prior owner); when the
   owner is the customer being financed, it is "buyer". notarized=true when a notary seal/stamp and notary signature are
@@ -231,6 +236,12 @@ WHAT TO COPY
 - Insurance: loss_payee exactly as written; limits as numbers; insurer is the carrier
   (the INSURER row on an ACORD certificate); policy_number as printed.
 
+SIGNATURES
+- seller_signed / buyer_signed / signed_by_customer = true for ANY mark on the signature line:
+  handwriting, a scribble, initials, faint or light ink, an electronic or DocuSign signature.
+- false ONLY when the signature line is clearly empty. null when you cannot tell.
+- Never write a note that a signature "appears" missing; a missing signature goes in the field.
+
 PRIVACY — do NOT copy these, anywhere, including notes:
 - full driver's license numbers (only the last 4 digits, in license_number_last4)
 - dates of birth, Social Security numbers, bank account numbers
@@ -239,7 +250,7 @@ PRIVACY — do NOT copy these, anywhere, including notes:
 NOTES — anomalies only
 - notes are ONLY for things a title analyst must look at: handwriting such as "Lien Hold",
   cross-outs or white-out, a different contract number written in, a required signature
-  missing, an odometer discrepancy box ticked, an auction or consignment sale, a date that
+  missing (only on documents with no signature field above), an odometer discrepancy box ticked, an auction or consignment sale, a date that
   looks wrong. At most 3 per document, one short sentence each.
 - Do NOT summarise the document, restate fields you already filled, or note things that are
   normal (blank unused reassignment sections, DocuSign details, terms and conditions, the

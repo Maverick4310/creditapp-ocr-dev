@@ -170,11 +170,18 @@ const NORMAL_NOTES = [
     re: /odometer.*\b(same|duplicat\w*|identical|matching)\b|\b(same|duplicat\w*|identical|matching)\b.*odometer/i },
 ];
 const normalNote = (type, n) => NORMAL_NOTES.some((x) => (!x.types || x.types.includes(type)) && x.re.test(n));
+// 2026-10 (UCB call, 41708906) A note saying a signature is missing, on a document whose signature fields
+// were read as signed or "couldn't tell", contradicts the reader's own answer. The fields (and the
+// invoice_signed check, where a state requires signatures) decide; only a signature read as missing stays.
+const SIGNATURE_FIELDS = ["seller_signed", "buyer_signed", "signed_by_customer"];
+const UNSIGNED_NOTE = /\bunsigned\b|\bnot (been )?signed\b|\bno (visible )?signature|\bsignature(s| lines?)? (is |are |appears? |appear )?(blank|missing|absent)/i;
+const contradictedNote = (d, n) => UNSIGNED_NOTE.test(n)
+  && SIGNATURE_FIELDS.some((f) => f in d) && !SIGNATURE_FIELDS.some((f) => d[f] === false);
 
 export function runChecks(extraction, expected = {}) {
   const docs = (extraction && extraction.documents) || [];
   for (const d of docs) {
-    if (d.notes) d.notes = d.notes.filter((n) => !normalNote(d.type, n));
+    if (d.notes) d.notes = d.notes.filter((n) => !normalNote(d.type, n) && !contradictedNote(d, n));
   }
   const exp = { lienholder: "Navitas Credit LLC", ...expected };
   // 2026-10 (Titling answers) Salesforce sends the titling state; an explicit flag still wins.
@@ -416,10 +423,15 @@ export function runChecks(extraction, expected = {}) {
         [where(boxLien ? boxLien.doc : last.doc)]);
       // 2026-10 (Titling testing 23 Oct) Navitas's address as written, where one was written.
       const written = boxLien ? boxLien.address : named && isNavitas(named) ? (last.new_lienholder_address || named) : null;
+      // 2026-10 (UCB call, 41708906) Handwriting the reader is unsure of ("201" read as 401) is a "please look",
+      // never a claim that the address is wrong.
+      const unclear = (boxLien ? boxLien.address_clear : last.new_lienholder_address_clear) === false;
       if (written && /\d/.test(written)) {
         const ok = navitasAddressOk(written);
         add("lienholder_address", `${exp.lienholder}'s address is correct` + tag, ok ? "pass" : "warn",
-          ok ? `${written}.` : `Written: ${written}. Expected 201 Executive Center Dr, Suite 100, Columbia, SC 29210.`,
+          ok ? `${written}.`
+            : unclear ? `Handwritten and hard to read (read as: ${written}). Please check it reads 201 Executive Center Dr, Suite 100, Columbia, SC 29210.`
+              : `Written: ${written}. Expected 201 Executive Center Dr, Suite 100, Columbia, SC 29210.`,
           [where(boxLien ? boxLien.doc : last.doc)]);
       }
     }

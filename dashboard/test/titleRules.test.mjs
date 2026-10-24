@@ -532,6 +532,40 @@ test("Navitas's address missing Center goes to review", () => {
   assert.match(r.checks.find((c) => c.id === "lienholder_address").detail, /201 Executive Center Dr/);
 });
 
+// ── UCB sales call, 23 Oct 2026: handwriting misreads ───
+test("a handwritten address the reader is unsure of asks for a look instead of calling it wrong", () => {
+  const p = cleanPackage();
+  Object.assign(p.documents.find((d) => d.type === "title_back").assignments[0],
+    { new_lienholder_address: "401 Executive Center Dr #100 Columbia, SC 29210", new_lienholder_address_clear: false });
+  const c = runChecks(p, EXPECTED).checks.find((k) => k.id === "lienholder_address");
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /hard to read/);
+  assert.doesNotMatch(c.detail, /^Written:/);
+});
+
+test("a clearly written wrong address is still called out", () => {
+  const p = cleanPackage();
+  Object.assign(p.documents.find((d) => d.type === "title_back").assignments[0],
+    { new_lienholder_address: "401 Executive Center Dr #100 Columbia, SC 29210", new_lienholder_address_clear: true });
+  assert.match(runChecks(p, EXPECTED).checks.find((k) => k.id === "lienholder_address").detail, /^Written: 401/);
+});
+
+test("an 'appears unsigned' note is dropped when the reader did not read the signature as missing", () => {
+  const p = cleanPackage();
+  const inv = p.documents.find((d) => d.type === "invoice");
+  Object.assign(inv, { seller_signed: true, buyer_signed: null,
+    notes: ["Buyer signature lines show dates but appear unsigned (no visible signature marks)"] });
+  assert.equal(status(runChecks(p, EXPECTED), "analyst_notes"), undefined);
+  Object.assign(inv, { buyer_signed: false, notes: ["Buyer signature lines show dates but appear unsigned (no visible signature marks)"] });
+  assert.equal(status(runChecks(p, EXPECTED), "analyst_notes"), "warn", "a signature read as missing keeps its note");
+});
+
+test("a missing-signature note on a document without signature fields is kept", () => {
+  const p = cleanPackage();
+  p.documents.push(doc("other", [16], { notes: ["Odometer disclosure transferee signature line left blank"] }));
+  assert.equal(status(runChecks(p, EXPECTED), "analyst_notes"), "warn");
+});
+
 test("a lienholder with no address written skips the address check", () => {
   const r = runChecks(cleanPackage(), EXPECTED);
   assert.equal(status(r, "lienholder_address"), undefined);
