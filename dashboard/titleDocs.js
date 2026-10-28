@@ -16,15 +16,28 @@
 // to keep in the X-Split-Pages header ("3,4"). Returns just those pages as a PDF. No model
 // call: Salesforce uses it to save each filed document as its own file.
 //
+// 2026-10 (Large Packages) POST /title-docs/fetch — { contentVersionId, mediaType, expected }.
+// For files too large for Apex to send (over 11 MB). Starts the read in the background and
+// returns 202 { ok, jobId } at once, because a large package can take longer than Apex's
+// 120 s callout limit. GET /title-docs/jobs/:id returns { ok, done: false } while it runs,
+// then the same body (and HTTP status) /title-docs would have returned, plus done: true.
+// Jobs live in memory for 2 hours; a restart loses them (Salesforce then asks for Check again).
+//
 // Salesforce (CreditAppOcrController, called from a Queueable after a rep uploads a
 // document) sends the same X-Navitas-Token as /ocr. Logs carry counts only — never
 // document contents, names or numbers.
 import express from "express";
+import { randomUUID } from "node:crypto";
 import { PDFDocument } from "pdf-lib"; // 2026-09 (Title Split)
 import { TITLE_TOOL, TITLE_PROMPT } from "./titlePrompt.js";
 import { runChecks } from "./titleRules.js";
+import { makeSfFiles } from "./sfFiles.js"; // 2026-10 (Large Packages)
 
 const MAX_FILES = 10;
+// 2026-10 (Large Packages) The model API takes requests up to 32 MB; base64 adds a third.
+const MAX_FETCH_BYTES = parseInt(process.env.TITLE_MAX_FETCH_BYTES || String(22 * 1024 * 1024), 10);
+const JOB_TTL_MS = 2 * 60 * 60 * 1000;
+const FETCH_TYPES = new Set(["application/pdf", "image/jpeg", "image/png"]);
 
 // A list, a JSON string of a list, or a JSON string of { [key]: list } → the list; else null.
 function asArray(value, key) {
@@ -39,30 +52,73 @@ function asArray(value, key) {
   return Array.isArray(v) ? v : null;
 }
 
-export function registerTitleDocs(app, { anthropic, model, checkToken, fileBlock }) {
+export function registerTitleDocs(app, { anthropic, model, checkToken, fileBlock, sfFiles = makeSfFiles() }) {
   const maxTokens = parseInt(process.env.TITLE_MAX_TOKENS || "16000", 10);
 
   const raw = express.raw({ type: ["application/pdf", "image/*"], limit: "30mb" });
 
   app.post("/title-docs", checkToken, raw, async (req, res) => {
-    const started = Date.now();
+    let files;
+    let expected;
+    if (Buffer.isBuffer(req.body)) {
+      files = [{ media_type: req.get("content-type").split(";")[0].trim(), data: req.body.toString("base64") }];
+      try {
+        expected = JSON.parse(Buffer.from(req.get("x-title-expected") || "", "base64").toString("utf8") || "{}");
+      } catch {
+        return res.status(400).json({ ok: false, error: "X-Title-Expected is not base64 JSON." });
+      }
+    } else {
+      ({ files, expected } = req.body || {});
+    }
+    const { status, body } = await readAndCheck(files, expected);
+    return res.status(status).json(body);
+  });
+
+  // 2026-10 (Large Packages) Background reads of files Salesforce cannot send itself.
+  const jobs = new Map(); // jobId → { at, done, status, body }
+  const prune = () => {
+    for (const [id, j] of jobs) if (Date.now() - j.at > JOB_TTL_MS) jobs.delete(id);
+  };
+
+  app.post("/title-docs/fetch", checkToken, async (req, res) => {
+    prune();
+    const { contentVersionId, mediaType, expected } = req.body || {};
+    if (!FETCH_TYPES.has(mediaType)) {
+      return res.status(400).json({ ok: false, error: "mediaType must be application/pdf, image/jpeg or image/png." });
+    }
+    if (!sfFiles.configured()) return res.status(503).json({ ok: false, error: "Large files cannot be read yet." });
+    const jobId = randomUUID();
+    const job = { at: Date.now(), done: false };
+    jobs.set(jobId, job);
+    res.status(202).json({ ok: true, jobId });
+
     try {
-      let files;
-      let expected;
-      if (Buffer.isBuffer(req.body)) {
-        files = [{ media_type: req.get("content-type").split(";")[0].trim(), data: req.body.toString("base64") }];
-        try {
-          expected = JSON.parse(Buffer.from(req.get("x-title-expected") || "", "base64").toString("utf8") || "{}");
-        } catch {
-          return res.status(400).json({ ok: false, error: "X-Title-Expected is not base64 JSON." });
-        }
-      } else {
-        ({ files, expected } = req.body || {});
-      }
+      const bytes = await sfFiles.download(contentVersionId, MAX_FETCH_BYTES);
+      console.log(`Title fetch: ${Math.round(bytes.length / 1024)} KB downloaded.`);
+      Object.assign(job, await readAndCheck([{ media_type: mediaType, data: bytes.toString("base64") }], expected));
+    } catch (err) {
+      console.error("Title fetch error:", err?.message || err);
+      Object.assign(job, { status: err?.status || 500,
+        body: { ok: false, error: err?.status ? err.message : "Reading the documents failed. Please retry." } });
+    }
+    job.done = true;
+  });
+
+  app.get("/title-docs/jobs/:id", checkToken, (req, res) => {
+    prune();
+    const job = jobs.get(req.params.id);
+    if (!job) return res.status(404).json({ ok: false, done: true, error: "This check is no longer available. Please use Check again." });
+    if (!job.done) return res.json({ ok: true, done: false });
+    return res.status(job.status).json({ ...job.body, done: true });
+  });
+
+  // files + expected → { status, body } as /title-docs returns them.
+  async function readAndCheck(files, expected) {
+    const started = Date.now();
+    const fail = (status, error) => ({ status, body: { ok: false, error } });
+    try {
       const list = Array.isArray(files) ? files : [];
-      if (!list.length || list.length > MAX_FILES) {
-        return res.status(400).json({ ok: false, error: `Send 1 to ${MAX_FILES} files.` });
-      }
+      if (!list.length || list.length > MAX_FILES) return fail(400, `Send 1 to ${MAX_FILES} files.`);
 
       const content = [];
       list.forEach((f, i) => {
@@ -71,9 +127,7 @@ export function registerTitleDocs(app, { anthropic, model, checkToken, fileBlock
         content.push(block);
         content.push({ type: "text", text: `^ The document above is FILE ${i} (file_index ${i}).` });
       });
-      if (!content.length) {
-        return res.status(400).json({ ok: false, error: "No readable PDF or image was sent." });
-      }
+      if (!content.length) return fail(400, "No readable PDF or image was sent.");
       content.push({ type: "text", text: TITLE_PROMPT });
 
       // The model occasionally returns the document list in a shape that cannot be recovered;
@@ -90,7 +144,7 @@ export function registerTitleDocs(app, { anthropic, model, checkToken, fileBlock
         });
         if (message.stop_reason === "max_tokens") {
           console.error(`Title docs hit max_tokens (${maxTokens}) — raise TITLE_MAX_TOKENS.`);
-          return res.status(422).json({ ok: false, error: "The documents were too long to read in one pass." });
+          return fail(422, "The documents were too long to read in one pass.");
         }
         const toolUse = (message.content || []).find((b) => b.type === "tool_use");
         const input = toolUse && toolUse.input;
@@ -103,9 +157,7 @@ export function registerTitleDocs(app, { anthropic, model, checkToken, fileBlock
           console.error(`Title docs: attempt ${attempt} returned no readable document list (stop_reason=${message.stop_reason}).`);
         }
       }
-      if (!data) {
-        return res.status(422).json({ ok: false, error: "The documents could not be read cleanly. Please retry." });
-      }
+      if (!data) return fail(422, "The documents could not be read cleanly. Please retry.");
       data.package_notes = asArray(data.package_notes, "package_notes") || [];
       const result = runChecks(data, expected || {});
       console.log(
@@ -113,12 +165,12 @@ export function registerTitleDocs(app, { anthropic, model, checkToken, fileBlock
           `verdict ${result.verdict} (${result.summary.fail} fail, ${result.summary.warn} warn), ` +
           `${Date.now() - started} ms, ${message.usage?.input_tokens || 0} in / ${message.usage?.output_tokens || 0} out tokens.`
       );
-      return res.json({ ok: true, data, result });
+      return { status: 200, body: { ok: true, data, result } };
     } catch (err) {
       console.error("Title docs error:", err?.message || err);
-      return res.status(500).json({ ok: false, error: "Reading the documents failed. Please retry." });
+      return fail(500, "Reading the documents failed. Please retry.");
     }
-  });
+  }
 
   // 2026-09 (Title Split)
   const rawPdf = express.raw({ type: "application/pdf", limit: "30mb" });
