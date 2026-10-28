@@ -15,7 +15,7 @@ function cleanPackage() {
       doc("title_information_sheet", [1], { contract_number: "41000001", vin: VIN }),
       doc("title_front", [2], { vin: VIN, owner_names: ["Desert Truck Centers of Arizona Inc"], lienholders: [] }),
       doc("title_back", [3], { assignments: [{ seller_name: "DESERT TRUCK CENTERS OF ARIZONA INC", buyer_name: "ACME PAVING LLC",
-        new_lienholder: "NAVITAS CREDIT CORP", seller_signed: true, sale_date: "2026-08-28", odometer: "41200" }] }),
+        new_lienholder: "NAVITAS CREDIT LLC", seller_signed: true, sale_date: "2026-08-28", odometer: "41200" }] }),
       doc("power_of_attorney", [4], { contract_number: "41000001", vin: VIN, poa_role: "buyer", notarized: true,
         remote_online_notarization: true, signature_date: "2026-08-25", notary_date: "2026-08-25" }),
       doc("notary_or_signing_certificate", [5, 6]),
@@ -402,7 +402,7 @@ test("a file with several titles checks each vehicle on its own", () => {
   const V2 = "1FTFW1E50NFA00002";
   const extraction = { documents: [
     doc("title_front", [1], { vin: V1, owner_names: ["Seller One"], lienholders: [] }),
-    doc("title_back", [2], { assignments: [{ seller_name: "Seller One", buyer_name: "Acme Paving LLC", seller_signed: true, new_lienholder: "Navitas Credit Corp", odometer: "1200" }] }),
+    doc("title_back", [2], { assignments: [{ seller_name: "Seller One", buyer_name: "Acme Paving LLC", seller_signed: true, new_lienholder: "Navitas Credit LLC", odometer: "1200" }] }),
     doc("title_front", [3], { vin: V2, owner_names: ["Seller Two"], lienholders: [] }),
     doc("reassignment_form", [4], { assignments: [{ seller_name: "Seller Two", buyer_name: "Someone Else Inc", seller_signed: true, odometer: "900" }] }),
   ] };
@@ -517,7 +517,7 @@ test("Navitas in the title's lienholder box counts when the assignment's box is 
   const p = cleanPackage();
   p.documents.find((d) => d.type === "title_back").assignments[0].new_lienholder = null;
   p.documents.find((d) => d.type === "title_front").lienholders = [
-    { name: "Navitas Credit Corp.", address: "201 Executive Center Drive, Suite 100 Columbia, SC 29210" }];
+    { name: "Navitas Credit LLC", address: "201 Executive Center Drive, Suite 100 Columbia, SC 29210" }];
   const r = runChecks(p, EXPECTED);
   assert.equal(status(r, "lienholder_on_assignment"), "pass");
   assert.equal(status(r, "lienholder_address"), "pass");
@@ -603,4 +603,68 @@ test("a driver's license the reader found hard to make out goes to review", () =
   const r = runChecks(p, EXPECTED);
   assert.equal(status(r, "license_legible"), "warn");
   assert.equal(status(r, "license_current"), "pass");
+});
+
+// 2026-10 (Titling answers 28 Oct)
+test("only Navitas Credit LLC passes as lienholder; Corp goes to Titling in CA and VA", () => {
+  const p = cleanPackage();
+  assert.equal(status(runChecks(p, EXPECTED), "lienholder_llc"), undefined);
+  p.documents.find((d) => d.type === "title_back").assignments[0].new_lienholder = "Navitas Credit Corp.";
+  assert.equal(status(runChecks(p, { ...EXPECTED, titlingState: "CO" }), "lienholder_llc"), "fail");
+  assert.equal(status(runChecks(p, { ...EXPECTED, titlingState: "CA" }), "lienholder_llc"), "warn");
+  assert.equal(runChecks(p, { ...EXPECTED, titlingState: "CO" }).verdict, "fail");
+});
+
+test("Navitas Credit Corp in the title's lienholder box is checked too", () => {
+  const p = cleanPackage();
+  p.documents.find((d) => d.type === "title_back").assignments[0].new_lienholder = null;
+  p.documents.find((d) => d.type === "title_front").lienholders = [{ name: "NAVITAS CREDIT CORPORATION" }];
+  assert.equal(status(runChecks(p, EXPECTED), "lienholder_llc"), "fail");
+});
+
+test("insurance states need a binder; an ID card alone fails", () => {
+  const withIns = (...forms) => {
+    const p = cleanPackage();
+    forms.forEach((f, i) => p.documents.push(doc("insurance", [16 + i], { insurance_form: f, loss_payee: "Navitas Credit LLC", comprehensive_and_collision: f === "id_card" ? null : true })));
+    return p;
+  };
+  const SC = { ...EXPECTED, titlingState: "SC" };
+  assert.equal(status(runChecks(withIns("id_card"), SC), "insurance_binder"), "fail");
+  assert.equal(status(runChecks(withIns("id_card", "binder"), SC), "insurance_binder"), "pass");
+  assert.equal(status(runChecks(withIns("id_card", "binder"), SC), "insurance_loss_payee"), "pass");
+  assert.equal(status(runChecks(withIns("declarations_page"), SC), "insurance_binder"), "pass");
+  assert.equal(status(runChecks(withIns("certificate"), SC), "insurance_binder"), "warn");
+  assert.equal(status(runChecks(withIns("id_card"), { ...EXPECTED, titlingState: "GA" }), "insurance_binder"), undefined);
+});
+
+test("comprehensive and collision the reader could not see is review in insurance states only", () => {
+  const p = cleanPackage();
+  p.documents.push(doc("insurance", [16], { insurance_form: "binder", loss_payee: "Navitas Credit LLC" }));
+  assert.equal(status(runChecks(p, { ...EXPECTED, titlingState: "TN" }), "insurance_comp_collision"), "warn");
+  assert.equal(status(runChecks(p, EXPECTED), "insurance_comp_collision"), undefined);
+});
+
+test("blank signer positions and stamped or typed signatures are flagged for review", () => {
+  const p = cleanPackage();
+  p.documents.find((d) => d.type === "equipment_finance_agreement").signatures = [
+    { signer: "customer", signed: true, kind: "electronic" }, { signer: "guarantor", signed: false, kind: null }];
+  p.documents.find((d) => d.type === "power_of_attorney").signatures = [{ signer: "owner", signed: true, kind: "stamped" }];
+  p.documents.find((d) => d.type === "title_back").signatures = [{ signer: "seller", signed: false }];
+  p.documents.find((d) => d.type === "invoice").signatures = [{ signer: "buyer", signed: false }];
+  const r = runChecks(p, EXPECTED);
+  assert.equal(status(r, "signer_positions"), "warn");
+  assert.match(r.checks.find((c) => c.id === "signer_positions").detail, /guarantor/);
+  assert.doesNotMatch(r.checks.find((c) => c.id === "signer_positions").detail, /seller|invoice/);
+  assert.equal(status(r, "signature_style"), "warn");
+  assert.match(r.checks.find((c) => c.id === "signature_style").detail, /owner signature is stamped/);
+});
+
+test("handwritten and electronic signatures pass without a signature flag", () => {
+  const p = cleanPackage();
+  p.documents.find((d) => d.type === "power_of_attorney").signatures = [{ signer: "owner", signed: true, kind: "electronic" }];
+  p.documents.find((d) => d.type === "equipment_finance_agreement").signatures = [{ signer: "customer", signed: true, kind: "handwritten" }];
+  const r = runChecks(p, EXPECTED);
+  assert.equal(status(r, "signer_positions"), undefined);
+  assert.equal(status(r, "signature_style"), undefined);
+  assert.equal(r.verdict, "pass");
 });

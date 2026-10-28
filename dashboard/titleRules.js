@@ -29,6 +29,13 @@ export const INVOICE_SIGNATURE_STATES = ["AR", "CO", "GA", "IN", "KY", "LA", "MD
 export const INVOICE_SIGNATURE_COUNTIES = { FL: ["BROWARD"] };
 // Florida's Coral Springs tag agency (Broward County) needs wet-ink POAs.
 export const WET_INK_POA_COUNTIES = { FL: ["BROWARD"] };
+// 2026-10 (Titling answers 28 Oct) Navitas is not an LLC yet in these states, so a title naming Navitas
+// Credit Corp as lienholder goes to Titling to approve there; everywhere else only the LLC passes.
+export const CORP_NAME_STATES = ["CA", "VA"];
+// 2026-10 (Titling answers 28 Oct) Documents whose every signer position must be signed. Invoices follow
+// INVOICE_SIGNATURE_STATES, and the seller lines on assignments are checked by assignment_signed.
+const SIGNED_DOC_TYPES = ["title_back", "reassignment_form", "title_application", "guaranty_of_title", "lien_release",
+  "one_and_same_letter", "power_of_attorney", "equipment_finance_agreement", "titled_addendum", "other_addendum"];
 
 const stateOf = (exp) => String(exp.titlingState || "").slice(0, 2).toUpperCase();
 // 2026-10 (Sales samples) "Maine" or "ME" → "ME", to compare a title application with the sheet.
@@ -176,7 +183,8 @@ const normalNote = (type, n) => NORMAL_NOTES.some((x) => (!x.types || x.types.in
 const SIGNATURE_FIELDS = ["seller_signed", "buyer_signed", "signed_by_customer"];
 const UNSIGNED_NOTE = /\bunsigned\b|\bnot (been )?signed\b|\bno (visible )?signature|\bsignature(s| lines?)? (is |are |appears? |appear )?(blank|missing|absent)/i;
 const contradictedNote = (d, n) => UNSIGNED_NOTE.test(n)
-  && SIGNATURE_FIELDS.some((f) => f in d) && !SIGNATURE_FIELDS.some((f) => d[f] === false);
+  && SIGNATURE_FIELDS.some((f) => f in d) && !SIGNATURE_FIELDS.some((f) => d[f] === false)
+  && !(d.signatures || []).some((x) => x.signed === false);
 
 export function runChecks(extraction, expected = {}) {
   const docs = (extraction && extraction.documents) || [];
@@ -190,6 +198,7 @@ export function runChecks(extraction, expected = {}) {
   }
   // "NAVITAS, 201 EXECUTIVE CENTER DR ..." is Navitas too.
   const isNavitas = (name) => sameName(nameOnly(name) || name, exp.lienholder) || /^NAVITAS/.test(nameKey(name));
+  const isCorpName = (name) => /\bNAVITAS\s+CREDIT\s+CORP(ORATION)?\b/i.test(String(name || ""));
   // 2026-10 (Titling testing 23 Oct) Navitas's lienholder address, word by word; "201 Executive Dr" is wrong.
   const navitasAddressOk = (text) => {
     const t = " " + String(text || "").toUpperCase().replace(/[^A-Z0-9]+/g, " ") + " ";
@@ -421,6 +430,16 @@ export function runChecks(extraction, expected = {}) {
             : !named ? "No new lienholder written on the last assignment (Navitas's lien is added after booking)."
               : `New lienholder written: ${named}.`,
         [where(boxLien ? boxLien.doc : last.doc)]);
+      // 2026-10 (Titling answers 28 Oct) Only Navitas Credit LLC passes; Navitas Credit Corp is for Titling
+      // to approve in CA and VA, where Navitas is not an LLC yet.
+      const lienName = boxLien ? boxLien.name : named && isNavitas(named) ? named : null;
+      if (lienName && isCorpName(lienName)) {
+        const allowed = CORP_NAME_STATES.includes(stateOf(exp));
+        add("lienholder_llc", `Lienholder is ${exp.lienholder}, not Navitas Credit Corp` + tag, allowed ? "warn" : "fail",
+          allowed ? `${lienName} is written. Navitas is not an LLC in ${stateOf(exp)} yet, so Titling approves it.`
+            : `${lienName} is written. Only ${exp.lienholder} is accepted (Corp is allowed only in ${CORP_NAME_STATES.join(" and ")}).`,
+          [where(boxLien ? boxLien.doc : last.doc)]);
+      }
       // 2026-10 (Titling testing 23 Oct) Navitas's address as written, where one was written.
       const written = boxLien ? boxLien.address : named && isNavitas(named) ? (last.new_lienholder_address || named) : null;
       // 2026-10 (UCB call, 41708906) Handwriting the reader is unsure of ("201" read as 401) is a "please look",
@@ -617,12 +636,30 @@ export function runChecks(extraction, expected = {}) {
     add("insurance_not_required", `Proof of insurance (not required in ${stateOf(exp) || "this state"})`, "na",
       "Insurance is not required for this titling state, so the certificate is not checked.", []);
   } else if (insurance.length) {
-    const ins = insurance[0];
+    // An ID card carries no coverage details, so read the other insurance document when there is one.
+    const ins = insurance.find((d) => d.insurance_form !== "id_card") || insurance[0];
+    // 2026-10 (Titling answers 28 Oct) Where insurance is required, a binder is needed: an ID card alone
+    // is not enough. A declarations page or the policy shows more than a binder, so it passes too;
+    // a certificate alone is review until Titling says whether it counts.
+    if (exp.insuranceRequired) {
+      const forms = insurance.map((d) => d.insurance_form);
+      const full = insurance.find((d) => ["binder", "declarations_page", "policy"].includes(d.insurance_form));
+      const cardOnly = forms.every((f) => f === "id_card");
+      add("insurance_binder", "Insurance binder (an ID card alone is not enough)", full ? "pass" : cardOnly ? "fail" : "warn",
+        full ? `${full.insurance_form.replace("_", " ")} found.`
+          : cardOnly ? "Only an insurance ID card was uploaded. A binder is needed."
+            : `No binder found (${forms.map((f) => (f || "unknown form").replace("_", " ")).join(", ")}). Please check it is enough.`,
+        insurance.map(where));
+    }
     add("insurance_loss_payee", `${exp.lienholder} is loss payee`,
       ins.loss_payee && isNavitas(ins.loss_payee) ? "pass" : "fail",
       `Loss payee: ${ins.loss_payee || "not shown"}.`, [where(ins)]);
     if (ins.comprehensive_and_collision === false) {
       add("insurance_comp_collision", "Comprehensive and collision coverage", "fail", "Not shown on the certificate.", [where(ins)]);
+    } else if (exp.insuranceRequired && ins.comprehensive_and_collision !== true) {
+      // 2026-10 (Titling answers 28 Oct) Required in insurance states; coverage the reader could not see is a look, not a failure.
+      add("insurance_comp_collision", "Comprehensive and collision coverage", "warn",
+        "Could not confirm comprehensive and collision coverage. Please check.", [where(ins)]);
     }
     const cost = exp.cost || (efa && efa.amount_financed);
     if (cost && ins.property_limit != null) {
@@ -646,6 +683,24 @@ export function runChecks(extraction, expected = {}) {
     }
   } else if (exp.insuranceRequired && !exp.docType) {
     add("insurance_present", "Proof of insurance (required in this state)", "fail", "No insurance document found.");
+  }
+
+  // ── Signatures ───────────────────────────────────────────────────────
+  // 2026-10 (Titling answers 28 Oct) Flag blank signer positions and stamped or computer-generated
+  // signatures. Ink color cannot be read reliably from a scan, so it stays with the reviewer.
+  const isAssignment = (d) => ["title_back", "reassignment_form"].includes(d.type);
+  const lines = docs.flatMap((d) => (d.signatures || []).map((x) => ({ ...x, doc: d })));
+  const blank = lines.filter((x) => x.signed === false && SIGNED_DOC_TYPES.includes(x.doc.type)
+    && !(isAssignment(x.doc) && /seller/i.test(x.signer)) && !isNavitas(x.signer));
+  if (blank.length) {
+    add("signer_positions", "Every signer position is signed", "warn",
+      blank.map((x) => `${where(x.doc)}: ${x.signer} signature line is blank`).join("; "), [...new Set(blank.map((x) => where(x.doc)))]);
+  }
+  const notPen = lines.filter((x) => x.signed !== false && (x.kind === "stamped" || x.kind === "typed"));
+  if (notPen.length) {
+    add("signature_style", "No stamped or computer-generated signatures", "warn",
+      notPen.map((x) => `${where(x.doc)}: ${x.signer} signature is ${x.kind === "typed" ? "computer-generated" : "stamped"}`).join("; "),
+      [...new Set(notPen.map((x) => where(x.doc)))]);
   }
 
   // ── Anything an analyst should see ───────────────────────────────────

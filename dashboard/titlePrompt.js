@@ -141,6 +141,8 @@ export const TITLE_TOOL = {
             license_expiration: { type: ["string", "null"], description: "YYYY-MM-DD" },
             license_number_last4: str,
             // Insurance
+            // 2026-10 (Titling answers 28 Oct) An ID card alone is not enough where insurance is required.
+            insurance_form: { type: ["string", "null"], enum: ["binder", "certificate", "declarations_page", "policy", "id_card", null] },
             insured_name: str,
             insurer: { type: ["string", "null"], description: "Insurance company (carrier) name" },
             policy_number: str,
@@ -152,6 +154,21 @@ export const TITLE_TOOL = {
             liability_aggregate: num,
             policy_expiration: { type: ["string", "null"], description: "YYYY-MM-DD" },
             vehicle_listed: bool,
+            // 2026-10 (Titling answers 28 Oct) Every signature line, to flag blank signer positions and
+            // stamped or computer-generated signatures.
+            signatures: {
+              type: "array",
+              description: "Every signature line on this document for the customer, buyer, seller, guarantor, owner or lienholder (not Navitas, notary or witness lines).",
+              items: {
+                type: "object",
+                properties: {
+                  signer: { type: "string", description: "Who signs there, as labelled: buyer, seller, customer, guarantor, owner, lienholder, dealer" },
+                  signed: bool,
+                  kind: { type: ["string", "null"], enum: ["handwritten", "electronic", "stamped", "typed", null] },
+                },
+                required: ["signer"],
+              },
+            },
             // Anything a title analyst would want to see: handwriting, stamps, cross-outs.
             notes: { type: "array", items: { type: "string" } },
           },
@@ -180,7 +197,9 @@ HOW TO SPLIT
 - A Retail Sales Order or Buyer's Order that prices the vehicle is an invoice.
 - invoice is only a document that sells the vehicle or equipment. A referral, broker or
   origination fee invoice is other.
-- insurance is only a certificate, declarations page or policy. An insurance authorization
+- insurance is a certificate, binder, declarations page, policy or insurance ID card; say which
+  in insurance_form (an ACORD 25/27/28 is certificate, an ACORD 75 or a page titled "binder" is
+  binder, a wallet-size card is id_card). An insurance authorization
   or request form (asking the agent to add Navitas) is other.
 - title_application: put the state the application is filed in (the new titling state) in
   title_state.
@@ -241,6 +260,12 @@ SIGNATURES
   handwriting, a scribble, initials, faint or light ink, an electronic or DocuSign signature.
 - false ONLY when the signature line is clearly empty. null when you cannot tell.
 - Never write a note that a signature "appears" missing; a missing signature goes in the field.
+- signatures: list each customer, buyer, seller, guarantor, owner, lienholder or dealer signature
+  line, with signed as above. Skip Navitas / Secured Party / Lessor, notary and witness lines, and
+  blank unused reassignment sections. kind: handwritten (pen), electronic (DocuSign or another
+  e-signature service, usually with "DocuSigned by" or an envelope ID), stamped (a rubber or
+  signature stamp), typed (a name printed in a font with no e-signature marks). A notary seal is
+  not a stamped signature. null when you cannot tell.
 
 PRIVACY — do NOT copy these, anywhere, including notes:
 - full driver's license numbers (only the last 4 digits, in license_number_last4)
