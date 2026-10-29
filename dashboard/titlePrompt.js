@@ -249,6 +249,8 @@ WHAT TO COPY
   the Pay Proceeds Direction (or the VENDOR box). federal_tax_id is the business tax ID
   printed on the EFA (the "Federal Tax ID#" box); customer_street/city/state/zip is the
   borrower address; equipment_location only when a separate equipment location is given.
+- EFA: vin, year, make and model come from the equipment description (the first vehicle when
+  several are listed; vin then lists every VIN).
 - Title: body_type, color, odometer, weights and axles only when printed on the title.
 - Title owner_names: the CURRENT owner(s) only. Some titles also print a "previous owner" line;
   never copy it into owner_names and never note it.

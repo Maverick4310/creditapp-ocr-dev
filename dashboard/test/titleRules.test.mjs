@@ -668,3 +668,28 @@ test("handwritten and electronic signatures pass without a signature flag", () =
   assert.equal(status(r, "signature_style"), undefined);
   assert.equal(r.verdict, "pass");
 });
+
+// 2026-10 (TITAN EFA slot) Year, make and model on the EFA against the vehicle in Salesforce.
+const efaCar = (extra) => {
+  const p = cleanPackage();
+  Object.assign(p.documents.find((d) => d.type === "equipment_finance_agreement"), { year: "2021", make: "Kenworth", model: "T880", ...extra });
+  return p;
+};
+const CAR = { ...EXPECTED, vehicles: [{ vin: VIN, year: "2021", make: "KENWORTH", model: "T880 Dump Truck" }] };
+test("the EFA's year, make and model match the vehicle", () => {
+  assert.equal(status(runChecks(efaCar(), CAR), "efa_equipment"), "pass");
+  assert.equal(status(runChecks(efaCar({ year: "21", make: "KENW" }), CAR), "efa_equipment"), "pass");
+});
+test("a different model or year on the EFA is a review, never a failure", () => {
+  const r = runChecks(efaCar({ model: "W900", year: "2019" }), CAR);
+  assert.equal(status(r, "efa_equipment"), "warn");
+  assert.match(r.checks.find((c) => c.id === "efa_equipment").detail, /year 2019 \(Salesforce 2021\), model W900/);
+});
+test("no EFA equipment check without Salesforce vehicle facts or an EFA reading", () => {
+  assert.equal(status(runChecks(efaCar(), EXPECTED), "efa_equipment"), undefined);
+  assert.equal(status(runChecks(cleanPackage(), CAR), "efa_equipment"), undefined);
+});
+test("an uploaded EFA fits the EFA slot", () => {
+  const p = { documents: [doc("equipment_finance_agreement", [1], { vin: VIN })] };
+  assert.equal(status(runChecks(p, { ...EXPECTED, docType: "EFA" }), "right_document"), "pass");
+});

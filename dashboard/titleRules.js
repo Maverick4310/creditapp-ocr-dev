@@ -165,6 +165,8 @@ const SLOT_TYPES = {
   "Proof of Insurance": ["insurance"],
   "POA - Buyer": ["power_of_attorney"],
   "POA - Seller": ["power_of_attorney"],
+  // 2026-10 (TITAN EFA slot) Titling opens the EFA to confirm the VIN and model.
+  "EFA": ["equipment_finance_agreement"],
 };
 
 // 2026-10 (Titling testing 23 Oct) Notes the Titling Manager confirmed are normal, so they never send a
@@ -298,6 +300,29 @@ export function runChecks(extraction, expected = {}) {
     const distinct = [...new Set(withVin.map((d) => vinKey(d.vin)))];
     add("vin_consistent", "Same VIN on every document", distinct.length === 1 ? "pass" : "warn",
       distinct.length === 1 ? `VIN ${distinct[0]}.` : `Different VINs: ${distinct.join(", ")}.`, withVin.map(where));
+  }
+
+  // 2026-10 (TITAN EFA slot) The equipment on the EFA (year, make, model) against the vehicle in Salesforce.
+  // The VIN is checked above with every other document. A review, never a failure: models are written many ways.
+  const cars = (exp.vehicles || []).filter((v) => v && (v.year || v.make || v.model));
+  const efaRead = of("equipment_finance_agreement").filter((d) => d.year || d.make || d.model);
+  if (cars.length && efaRead.length) {
+    const word = (x) => String(x || "").toUpperCase().replace(/[^A-Z0-9]+/g, " ").trim();
+    const sameWords = (a, b) => !word(a) || !word(b) || word(a).includes(word(b)) || word(b).includes(word(a));
+    const sameMake = (a, b) => !word(a) || !word(b) || word(a).slice(0, 4) === word(b).slice(0, 4);
+    const sameYear = (a, b) => !digits(a) || !digits(b) || digits(a).slice(-2) === digits(b).slice(-2);
+    const off = [];
+    efaRead.forEach((d) => {
+      const car = cars.find((v) => vinKey(v.vin) && docVins(d).includes(vinKey(v.vin))) || (cars.length === 1 ? cars[0] : null);
+      if (!car) return;
+      const diff = [];
+      if (!sameYear(d.year, car.year)) diff.push(`year ${d.year} (Salesforce ${car.year})`);
+      if (!sameMake(d.make, car.make)) diff.push(`make ${d.make} (Salesforce ${car.make})`);
+      if (!sameWords(d.model, car.model)) diff.push(`model ${d.model} (Salesforce ${car.model})`);
+      if (diff.length) off.push({ d, text: `${where(d)}: ${diff.join(", ")}` });
+    });
+    add("efa_equipment", "Equipment on the EFA matches the vehicle", off.length ? "warn" : "pass",
+      off.length ? off.map((o) => o.text).join("; ") : "Year, make and model match.", off.map((o) => where(o.d)));
   }
 
   // 2026-10 (Sales samples) The title application names the state the vehicle is being titled in.
