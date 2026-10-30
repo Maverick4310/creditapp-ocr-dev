@@ -48,3 +48,26 @@ test("rejects pages past the end and bad headers", async () => {
     assert.equal(notPdf.status, 422);
   });
 });
+
+// 2026-10 (Titling testing 30 Oct) Packages over 8 MB: the service downloads the package once and cuts it.
+test("split-remote downloads the package once and returns the requested pages", async () => {
+  const pdf = await fivePagePdf();
+  let downloads = 0;
+  const sfFiles = { configured: () => true, download: async () => { downloads++; return pdf; } };
+  const app = express();
+  app.use(express.json());
+  registerTitleDocs(app, { anthropic: null, model: "test", checkToken: (_q, _r, n) => n(), fileBlock: () => null, sfFiles });
+  const server = app.listen(0);
+  const url = `http://localhost:${server.address().port}/title-docs/split-remote`;
+  const post = (body) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  try {
+    const a = await post({ contentVersionId: "068000000000001AAA", pages: "2,3" });
+    assert.equal(a.status, 200);
+    assert.deepEqual((await PDFDocument.load(Buffer.from(await a.arrayBuffer()))).getPages().map((p) => p.getWidth()), [202, 203]);
+    const b = await post({ contentVersionId: "068000000000001AAA", pages: "5" });
+    assert.deepEqual((await PDFDocument.load(Buffer.from(await b.arrayBuffer()))).getPages().map((p) => p.getWidth()), [205]);
+    assert.equal(downloads, 1);
+    assert.equal((await post({ contentVersionId: "068000000000001AAA", pages: "x" })).status, 400);
+    assert.equal((await post({ contentVersionId: "068000000000001AAA", pages: "9" })).status, 400);
+  } finally { server.close(); }
+});

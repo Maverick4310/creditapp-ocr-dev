@@ -144,6 +144,9 @@ export const TITLE_TOOL = {
             // 2026-10 (Titling answers 28 Oct) An ID card alone is not enough where insurance is required.
             insurance_form: { type: ["string", "null"], enum: ["binder", "certificate", "declarations_page", "policy", "id_card", null] },
             insured_name: str,
+            // 2026-10 (Titling testing 30 Oct) to compare with the EFA and Navitas's address.
+            insured_address: { type: ["string", "null"], description: "The insured's address as printed" },
+            loss_payee_address: { type: ["string", "null"], description: "Address of the loss payee / certificate holder exactly as written" },
             insurer: { type: ["string", "null"], description: "Insurance company (carrier) name" },
             policy_number: str,
             loss_payee: str,
@@ -252,10 +255,21 @@ WHAT TO COPY
 - EFA: vin, year, make and model come from the equipment description (the first vehicle when
   several are listed; vin then lists every VIN).
 - Title: body_type, color, odometer, weights and axles only when printed on the title.
+  On an MSO / certificate of origin, body_type is the body type printed there (e.g. TRAILER).
+- MSO assignments: the MSO is issued by the manufacturer TO the first dealer printed on its face;
+  that is the first assignment (seller = manufacturer, buyer = that dealer). Each reassignment on the
+  back is then sold by the party named as seller in that block (normally the buyer of the block
+  before it). Never write the manufacturer as the seller of a back reassignment it did not sign.
+- Trailers have no odometer: leave odometer null and do not note it.
 - Title owner_names: the CURRENT owner(s) only. Some titles also print a "previous owner" line;
   never copy it into owner_names and never note it.
-- Insurance: loss_payee exactly as written; limits as numbers; insurer is the carrier
-  (the INSURER row on an ACORD certificate); policy_number as printed.
+- Insurance: loss_payee exactly as written (the loss payee, or the certificate holder when no
+  separate loss payee is named) and loss_payee_address its address as written; insured_name and
+  insured_address from the INSURED box; limits as numbers; insurer is the carrier (the INSURER row
+  on an ACORD certificate); policy_number as printed; policy_expiration the latest expiration date
+  for the auto / physical damage coverage.
+- A supplemental insurance page (ACORD 101 Additional Remarks, a vehicle schedule) is its own
+  insurance entry: copy the coverage it shows (comprehensive_and_collision, property_limit).
 
 SIGNATURES
 - seller_signed / buyer_signed / signed_by_customer = true for ANY mark on the signature line:

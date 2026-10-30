@@ -16,6 +16,10 @@
 // to keep in the X-Split-Pages header ("3,4"). Returns just those pages as a PDF. No model
 // call: Salesforce uses it to save each filed document as its own file.
 //
+// 2026-10 (Titling testing 30 Oct) POST /title-docs/split-remote — { contentVersionId, pages: "3,4" }.
+// The same cut for packages too large for Apex to hold (over 8 MB): the service downloads the package
+// itself (kept 10 minutes, since Salesforce asks for one document at a time) and returns the pages.
+//
 // 2026-10 (Large Packages) POST /title-docs/fetch — { contentVersionId, mediaType, expected }.
 // For files too large for Apex to send (over 11 MB). Starts the read in the background and
 // returns 202 { ok, jobId } at once, because a large package can take longer than Apex's
@@ -175,13 +179,40 @@ export function registerTitleDocs(app, { anthropic, model, checkToken, fileBlock
   // 2026-09 (Title Split)
   const rawPdf = express.raw({ type: "application/pdf", limit: "30mb" });
   app.post("/title-docs/split", checkToken, rawPdf, async (req, res) => {
-    try {
-      if (!Buffer.isBuffer(req.body) || !req.body.length) {
-        return res.status(400).json({ ok: false, error: "Send the PDF as application/pdf." });
+    if (!Buffer.isBuffer(req.body) || !req.body.length) {
+      return res.status(400).json({ ok: false, error: "Send the PDF as application/pdf." });
+    }
+    const pages = parsePages(req.get("x-split-pages"));
+    if (!pages) return res.status(400).json({ ok: false, error: "X-Split-Pages must list page numbers, e.g. 3,4." });
+    return cut(req.body, pages, res);
+  });
+
+  // 2026-10 (Titling testing 30 Oct) Downloaded packages, by ContentVersion Id, for the next cut.
+  const packages = new Map(); // versionId → { at, bytes }
+  const PACKAGE_TTL_MS = 10 * 60 * 1000;
+  app.post("/title-docs/split-remote", checkToken, async (req, res) => {
+    const { contentVersionId, pages: pageList } = req.body || {};
+    const pages = parsePages(pageList);
+    if (!pages) return res.status(400).json({ ok: false, error: "pages must list page numbers, e.g. 3,4." });
+    if (!sfFiles.configured()) return res.status(503).json({ ok: false, error: "Large files cannot be read yet." });
+    for (const [id, p] of packages) if (Date.now() - p.at > PACKAGE_TTL_MS) packages.delete(id);
+    let pkg = packages.get(contentVersionId);
+    if (!pkg) {
+      try {
+        pkg = { at: Date.now(), bytes: await sfFiles.download(contentVersionId, MAX_FETCH_BYTES) };
+      } catch (err) {
+        console.error("Title split download error:", err?.message || err);
+        return res.status(err?.status || 500).json({ ok: false, error: err?.status ? err.message : "The PDF could not be split." });
       }
-      const pages = parsePages(req.get("x-split-pages"));
-      if (!pages) return res.status(400).json({ ok: false, error: "X-Split-Pages must list page numbers, e.g. 3,4." });
-      const src = await PDFDocument.load(req.body, { ignoreEncryption: true });
+      packages.set(contentVersionId, pkg);
+    }
+    return cut(pkg.bytes, pages, res);
+  });
+
+  // PDF bytes + 1-based pages → just those pages, as a PDF response.
+  async function cut(pdf, pages, res) {
+    try {
+      const src = await PDFDocument.load(pdf, { ignoreEncryption: true });
       const total = src.getPageCount();
       if (pages.some((p) => p > total)) {
         return res.status(400).json({ ok: false, error: `The PDF has ${total} page(s).` });
@@ -197,7 +228,7 @@ export function registerTitleDocs(app, { anthropic, model, checkToken, fileBlock
       console.error("Title split error:", err?.message || err);
       return res.status(422).json({ ok: false, error: "The PDF could not be split." });
     }
-  });
+  }
 }
 
 // "3,4" or "3-5,7" → [3, 4] / [3, 4, 5, 7] (sorted, unique, 1-based); null when invalid.

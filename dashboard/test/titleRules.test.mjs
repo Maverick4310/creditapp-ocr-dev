@@ -54,13 +54,18 @@ const onePoa = (ron) => {
   p.documents.find((d) => d.type === "power_of_attorney").remote_online_notarization = ron;
   return p;
 };
-test("one original POA is not enough; NC takes originals only", () => {
+// 2026-10 (Titling testing 30 Oct) Originals only in the three NC counties whose tag offices refuse e-POAs.
+test("one original POA is not enough; Cabarrus, Harnett and Iredell counties (NC) take originals only", () => {
   assert.equal(status(runChecks(onePoa(false), EXPECTED), "poa_count"), "fail");
-  assert.equal(status(runChecks(onePoa(true), { ...EXPECTED, titlingState: "NC" }), "poa_count"), "fail");
+  assert.equal(status(runChecks(onePoa(true), { ...EXPECTED, titlingState: "NC" }), "poa_count"), "pass");
+  assert.equal(status(runChecks(onePoa(true), { ...EXPECTED, titlingState: "NC", titlingCounty: "Wake" }), "poa_count"), "pass");
+  const ired = runChecks(onePoa(true), { ...EXPECTED, titlingState: "NC", titlingCounty: "Iredell County" });
+  assert.equal(status(ired, "poa_count"), "fail");
+  assert.match(ired.checks.find((c) => c.id === "poa_count").detail, /Iredell County, NC takes original POAs only/);
   const nc = onePoa(false);
   nc.documents.push(doc("power_of_attorney", [9], { contract_number: "41000001", vin: VIN, poa_role: "buyer", notarized: true,
     signature_date: "2026-08-25", notary_date: "2026-08-25" }));
-  assert.equal(status(runChecks(nc, { ...EXPECTED, titlingState: "NC" }), "poa_count"), "pass");
+  assert.equal(status(runChecks(nc, { ...EXPECTED, titlingState: "NC", titlingCounty: "Harnett" }), "poa_count"), "pass");
 });
 test("warns that Broward County's tag agency needs wet-ink POAs", () => {
   const r = runChecks(onePoa(true), { ...EXPECTED, titlingState: "FL", titlingCounty: "Broward" });
@@ -110,13 +115,14 @@ test("an unreleased lien fails unless released or being paid off", () => {
   assert.equal(status(runChecks(p, EXPECTED), "unreleased_liens"), "pass");
 });
 
-test("a title printed NO LIENS, with no lienholder box on the assignment, warns rather than fails", () => {
+// 2026-10 (Titling testing 30 Oct) Nothing written is normal: Navitas's lien goes on the title application.
+test("a title printed NO LIENS, with no lienholder box on the assignment, is not flagged", () => {
   const p = cleanPackage();
   p.documents[1].no_liens_stated = true;
   p.documents[2].assignments[0].new_lienholder = null;
   const r = runChecks(p, EXPECTED);
   assert.equal(status(r, "unreleased_liens"), "pass");
-  assert.equal(status(r, "lienholder_on_assignment"), "warn");
+  assert.equal(status(r, "lienholder_on_assignment"), "na");
 });
 
 test("assignment to someone else fails the chain", () => {
@@ -422,7 +428,7 @@ test("a Virginia title without a lienholder on the reassignment is not flagged",
   const p = cleanPackage();
   p.documents.find((d) => d.type === "title_back").assignments[0].new_lienholder = "";
   assert.equal(status(runChecks(p, { ...EXPECTED, titlingState: "VA" }), "lienholder_on_assignment"), "na");
-  assert.equal(status(runChecks(p, { ...EXPECTED, titlingState: "TX" }), "lienholder_on_assignment"), "warn");
+  assert.equal(status(runChecks(p, { ...EXPECTED, titlingState: "TX" }), "lienholder_on_assignment"), "na");
 });
 
 // 2026-10 (Sales samples) Fixes from three real sales packages (Oct 2026). Invented data.
@@ -692,4 +698,69 @@ test("no EFA equipment check without Salesforce vehicle facts or an EFA reading"
 test("an uploaded EFA fits the EFA slot", () => {
   const p = { documents: [doc("equipment_finance_agreement", [1], { vin: VIN })] };
   assert.equal(status(runChecks(p, { ...EXPECTED, docType: "EFA" }), "right_document"), "pass");
+});
+
+// ── 2026-10 (Titling testing 30 Oct) Julie's 41703857 / 41411556 / 40444256 findings ──
+function trailerPackage() {
+  const p = cleanPackage();
+  p.documents[1] = doc("mso", [2], { vin: VIN, body_type: "TRAILER", owner_names: ["Nolan Manufacturing LLC"] });
+  p.documents[2] = doc("reassignment_form", [3], {
+    assignments: [{ seller_name: "NC Trailer Sales", buyer_name: "Acme Paving LLC", seller_signed: true, odometer: null }],
+    notes: ["This is the back side of the MSO used as assignment form", "Only first assignment block is filled in; remaining three blocks are blank"],
+  });
+  return p;
+}
+test("a trailer's assignment needs no odometer reading", () => {
+  const r = runChecks(trailerPackage(), EXPECTED);
+  assert.equal(status(r, "assignment_odometer"), undefined);
+  const truck = cleanPackage();
+  truck.documents[2].assignments[0].odometer = null;
+  assert.equal(status(runChecks(truck, EXPECTED), "assignment_odometer"), "warn");
+});
+test("the sheet's vehicle type marks a trailer too", () => {
+  const p = cleanPackage();
+  p.documents[2].assignments[0].odometer = null;
+  const r = runChecks(p, { ...EXPECTED, vehicles: [{ vin: VIN, type: "TRL - Trailer" }] });
+  assert.equal(status(r, "assignment_odometer"), undefined);
+  assert.equal(status(runChecks(p, { ...EXPECTED, vehicles: [{ vin: VIN, type: "TK - Truck" }] }), "assignment_odometer"), "warn");
+});
+test("notes about an MSO back used for reassignment and its blank blocks are normal", () => {
+  const r = runChecks(trailerPackage(), EXPECTED);
+  assert.equal(status(r, "analyst_notes"), undefined);
+});
+function insured(extra = [], exp = {}) {
+  const p = cleanPackage();
+  p.documents[7] = { ...p.documents[7], customer_street: "1919 New Haven Ct SE", customer_city: "Smyrna", customer_state: "GA", customer_zip: "30080" };
+  p.documents.push(...extra);
+  return runChecks(p, { ...EXPECTED, titlingState: "TN", ...exp });
+}
+const cert = (pages, extra) => doc("insurance", pages, { insurance_form: "certificate", loss_payee: "Navitas Credit LLC", ...extra });
+test("insurance messages name the page", () => {
+  const r = insured([cert([20], { property_limit: 13800 })]);
+  assert.equal(status(r, "insurance_limit"), "fail");
+  assert.match(r.checks.find((c) => c.id === "insurance_limit").detail, /^insurance \(file 1, p20\): Coverage \$13,800/);
+});
+test("comp and collision on a certificate's second page counts", () => {
+  const r = insured([cert([20], { comprehensive_and_collision: null }), cert([21], { comprehensive_and_collision: true, loss_payee: null })]);
+  assert.equal(status(r, "insurance_comp_collision"), undefined);
+  assert.equal(status(r, "insurance_loss_payee"), "pass");
+});
+test("an expired policy, Navitas's old address and another insured address are flagged", () => {
+  const r = insured([cert([20], { policy_expiration: "2026-01-01", loss_payee_address: "1 Old Road, Columbia, SC 29201",
+    insured_name: "Acme Paving LLC", insured_address: "2997 East Cobb Pkwy, Atlanta GA 31139" })]);
+  assert.equal(status(r, "insurance_current"), "fail");
+  assert.equal(status(r, "insurance_payee_address"), "warn");
+  assert.equal(status(r, "insurance_insured_address"), "warn");
+  assert.equal(status(r, "insurance_insured"), undefined);
+  const ok = insured([cert([20], { policy_expiration: "2027-01-01", loss_payee_address: "201 Executive Center Dr, Ste 100, Columbia, SC 29210",
+    insured_name: "Luna Landscape Corp", insured_address: "1919 New Haven Ct SE, Smyrna GA 30080" })]);
+  assert.equal(status(ok, "insurance_current"), undefined);
+  assert.equal(status(ok, "insurance_payee_address"), undefined);
+  assert.equal(status(ok, "insurance_insured_address"), undefined);
+  assert.equal(status(ok, "insurance_insured"), "warn");
+});
+test("insurance notes are dropped where insurance is not required", () => {
+  const r = insured([cert([20], { notes: ["Supplements the ACORD 25 certificate"] }), cert([21], { notes: ["Something odd"] })], { titlingState: "GA" });
+  assert.equal(status(r, "insurance_not_required"), "na");
+  assert.equal(status(r, "analyst_notes"), undefined);
 });

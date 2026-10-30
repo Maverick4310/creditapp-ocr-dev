@@ -22,8 +22,10 @@
 // 2026-10 (Titling answers) Title Department, 2 Oct 2026.
 // Insurance is required in these titling states (not on a lien addition only).
 export const INSURANCE_STATES = ["DC", "MN", "NC", "OR", "SC", "TN", "WV"];
-// One remotely notarized (DocuSign) buyer POA is enough, except in these states (originals only).
-export const ORIGINAL_POA_STATES = ["NC"];
+// One remotely notarized (DocuSign) buyer POA is enough, except in these counties (originals only).
+// 2026-10 (Titling testing 30 Oct) Not all of North Carolina: only the Kannapolis, Angier and Mooresville
+// tag offices refuse electronic POAs (Cabarrus, Harnett and Iredell counties), per the NC state rules.
+export const ORIGINAL_POA_COUNTIES = { NC: ["CABARRUS", "HARNETT", "IREDELL"] };
 // The invoice or bill of sale must be signed by buyer and seller in these states (+ Broward County, FL).
 export const INVOICE_SIGNATURE_STATES = ["AR", "CO", "GA", "IN", "KY", "LA", "MD", "NE", "SC", "TX", "VA"];
 export const INVOICE_SIGNATURE_COUNTIES = { FL: ["BROWARD"] };
@@ -178,6 +180,16 @@ const NORMAL_NOTES = [
   { types: ["title_front", "title_back", "mso", "reassignment_form", "title_application"],
     re: /odometer.*\b(same|duplicat\w*|identical|matching)\b|\b(same|duplicat\w*|identical|matching)\b.*odometer/i },
 ];
+// 2026-10 (Titling testing 30 Oct) The reader described an MSO back used as the reassignment form and
+// the blank reassignment blocks after the last one used: both normal (41703857, 41411556). So is a
+// supplemental insurance page ("Additional Remarks Schedule") that only continues the certificate.
+NORMAL_NOTES.push(
+  { types: ["title_back", "reassignment_form", "mso"],
+    re: /\b(remaining|other|unused|subsequent|later)\b.*\bblank\b|\bblank\b.*\b(remaining|unused)\b|\bonly (the )?first\b.*\b(filled|completed|used)\b/i },
+  { types: ["title_back", "reassignment_form", "mso"],
+    re: /\b(back|reverse)( side)? of (the )?(MSO|certificate of origin|title|manufacturer)/i },
+  { types: ["insurance"], re: /\b(additional remarks|supplement\w*|continuation)\b/i },
+);
 const normalNote = (type, n) => NORMAL_NOTES.some((x) => (!x.types || x.types.includes(type)) && x.re.test(n));
 // 2026-10 (UCB call, 41708906) A note saying a signature is missing, on a document whose signature fields
 // were read as signed or "couldn't tell", contradicts the reader's own answer. The fields (and the
@@ -188,15 +200,31 @@ const contradictedNote = (d, n) => UNSIGNED_NOTE.test(n)
   && SIGNATURE_FIELDS.some((f) => f in d) && !SIGNATURE_FIELDS.some((f) => d[f] === false)
   && !(d.signatures || []).some((x) => x.signed === false);
 
+// 2026-10 (Titling testing 30 Oct) Trailers have no odometer, so no reading is expected on their
+// assignments (41703857, 41411556). A trailer by its body type or name on the document, or by the
+// sheet's vehicle type ("TRL - Trailer") that Salesforce sends with each vehicle.
+// "TR" is a truck in Salesforce's body-type map, so only TRL / TL / TRLR / SEMI / TRAILER count.
+const TRAILER = /\b(TRL|TL|TRLR|SEMI)\b|TRAILER/i;
+const docTrailer = (d) => TRAILER.test(String(d.body_type || "")) || /TRAILER/i.test(`${d.make || ""} ${d.model || ""}`);
+
 export function runChecks(extraction, expected = {}) {
   const docs = (extraction && extraction.documents) || [];
-  for (const d of docs) {
-    if (d.notes) d.notes = d.notes.filter((n) => !normalNote(d.type, n) && !contradictedNote(d, n));
-  }
   const exp = { lienholder: "Navitas Credit LLC", ...expected };
   // 2026-10 (Titling answers) Salesforce sends the titling state; an explicit flag still wins.
   if (exp.insuranceRequired === undefined && exp.titlingState) {
     exp.insuranceRequired = INSURANCE_STATES.includes(stateOf(exp)) && !exp.lienAdditionOnly;
+  }
+  const sheetTrailer = (vin) => (exp.vehicles || []).some((v) => v && /^TRL/i.test(String(v.type || ""))
+    && (!vin || !vinKey(v.vin) || vinKey(v.vin) === vin));
+  const allTrailers = (exp.vehicles || []).length > 0 && exp.vehicles.every((v) => v && /^TRL/i.test(String(v.type || "")));
+  for (const d of docs) {
+    if (!d.notes) continue;
+    d.notes = d.notes.filter((n) => !normalNote(d.type, n) && !contradictedNote(d, n)
+      // A trailer's missing odometer is not worth a note either.
+      && !(/odometer|mileage/i.test(n) && (docTrailer(d) || allTrailers))
+      // 2026-10 (Titling testing 30 Oct) Where insurance is not required the certificate is not checked,
+      // so its notes are not either.
+      && !(d.type === "insurance" && exp.insuranceRequired === false));
   }
   // "NAVITAS, 201 EXECUTIVE CENTER DR ..." is Navitas too.
   const isNavitas = (name) => sameName(nameOnly(name) || name, exp.lienholder) || /^NAVITAS/.test(nameKey(name));
@@ -434,7 +462,8 @@ export function runChecks(extraction, expected = {}) {
       }
       // 2026-10 (Titling testing 23 Oct) Every assignment carries an odometer reading ("EXEMPT" counts);
       // the same reading on two assignments is fine. Review, not a failure, until Titling signs off.
-      const noOdometer = assignments.filter((a) => !String(a.odometer || "").trim());
+      const trailer = g.docs.some(docTrailer) || sheetTrailer(vin) || allTrailers;
+      const noOdometer = trailer ? [] : assignments.filter((a) => !String(a.odometer || "").trim());
       if (noOdometer.length) {
         add("assignment_odometer", "Every assignment shows an odometer reading" + tag, "warn",
           noOdometer.map((a) => `${a.seller_name || "seller"} → ${a.buyer_name || "buyer"}: no odometer reading`).join("; "),
@@ -449,10 +478,12 @@ export function runChecks(extraction, expected = {}) {
       // the title application, added after booking (Titling Manager, 2 Oct 2026).
       const noLienSection = !named && !boxLien && stateOf(exp) === "VA";
       add("lienholder_on_assignment", `${exp.lienholder} is named as new lienholder` + tag,
-        noLienSection ? "na" : boxLien ? "pass" : !named ? "warn" : isNavitas(named) ? "pass" : broker ? "warn" : "fail",
+        // 2026-10 (Titling testing 30 Oct) Nothing written is normal: many assignments (an MSO back) have no
+        // lienholder section, and Navitas's lien goes on the title application after booking (41411556).
+        noLienSection || !named && !boxLien ? "na" : boxLien ? "pass" : isNavitas(named) ? "pass" : broker ? "warn" : "fail",
         noLienSection ? "Virginia reassignments have no lienholder section; Navitas goes on the title application after booking."
           : boxLien ? `${boxLien.name} is written in the lienholder box (${where(boxLien.doc)}).`
-            : !named ? "No new lienholder written on the last assignment (Navitas's lien is added after booking)."
+            : !named ? "No lienholder written on the assignment; Navitas's lien goes on the title application after booking."
               : `New lienholder written: ${named}.`,
         [where(boxLien ? boxLien.doc : last.doc)]);
       // 2026-10 (Titling answers 28 Oct) Only Navitas Credit LLC passes; Navitas Credit Corp is for Titling
@@ -610,15 +641,17 @@ export function runChecks(extraction, expected = {}) {
     if (!exp.docType && broker && brokerPoas.length) {
       add("poa_count", "Broker POA to Navitas", "pass", `${brokerPoas.length} broker POA(s) granted to Navitas.`, brokerPoas.map(where));
     } else if (!exp.docType) {
-      // 2026-10 (Titling answers) One remotely notarized POA is enough; two if originals; NC originals only.
-      const originalsOnly = ORIGINAL_POA_STATES.includes(stateOf(exp));
+      // 2026-10 (Titling answers) One remotely notarized POA is enough; two if originals; originals only in
+      // the NC counties whose tag offices refuse electronic POAs.
+      const originalsOnly = countyIn(ORIGINAL_POA_COUNTIES, exp);
+      const county = `${String(exp.titlingCounty || "").replace(/\s+county$/i, "").trim()} County, ${stateOf(exp)}`;
       const eBuyer = buyerPoas.filter((d) => d.remote_online_notarization);
       const originals = buyerPoas.filter((d) => !d.remote_online_notarization);
       const met = originalsOnly ? originals.length >= 2 : eBuyer.length > 0 || originals.length >= 2;
-      add("poa_count", originalsOnly ? "Two original buyer POAs (NC)" : "Buyer POA: one notarized online, or two originals",
+      add("poa_count", originalsOnly ? `Two original buyer POAs (${county})` : "Buyer POA: one notarized online, or two originals",
         met ? "pass" : "fail",
         met ? (eBuyer.length && !originalsOnly ? `${eBuyer.length} buyer POA(s) notarized online.` : `${originals.length} original buyer POAs.`)
-          : originalsOnly && eBuyer.length ? `North Carolina takes original POAs only; ${eBuyer.length} notarized online, ${originals.length} original.`
+          : originalsOnly && eBuyer.length ? `${county} takes original POAs only; ${eBuyer.length} notarized online, ${originals.length} original.`
             : originals.length === 1 ? "One original buyer POA. Two originals are needed, or one notarized online."
               : "No buyer POA found.",
         buyerPoas.map(where));
@@ -661,8 +694,14 @@ export function runChecks(extraction, expected = {}) {
     add("insurance_not_required", `Proof of insurance (not required in ${stateOf(exp) || "this state"})`, "na",
       "Insurance is not required for this titling state, so the certificate is not checked.", []);
   } else if (insurance.length) {
-    // An ID card carries no coverage details, so read the other insurance document when there is one.
-    const ins = insurance.find((d) => d.insurance_form !== "id_card") || insurance[0];
+    // An ID card carries no coverage details, so read the other insurance documents first.
+    // 2026-10 (Titling testing 30 Oct) A certificate often continues on a second page (ACORD 101 "Additional
+    // Remarks"), where comp/collision or the limits may appear (40444256). Each fact comes from the first
+    // page that shows it, and every message names that page.
+    const ordered = [...insurance.filter((d) => d.insurance_form !== "id_card"), ...insurance.filter((d) => d.insurance_form === "id_card")];
+    const ins = ordered[0];
+    const from = (pick) => ordered.find((d) => pick(d) != null && pick(d) !== "") || null;
+    const at = (d) => `${where(d || ins)}: `;
     // 2026-10 (Titling answers 28 Oct) Where insurance is required, a binder is needed: an ID card alone
     // is not enough. A declarations page or the policy shows more than a binder, so it passes too;
     // a certificate alone is review until Titling says whether it counts.
@@ -671,40 +710,77 @@ export function runChecks(extraction, expected = {}) {
       const full = insurance.find((d) => ["binder", "declarations_page", "policy"].includes(d.insurance_form));
       const cardOnly = forms.every((f) => f === "id_card");
       add("insurance_binder", "Insurance binder (an ID card alone is not enough)", full ? "pass" : cardOnly ? "fail" : "warn",
-        full ? `${full.insurance_form.replace("_", " ")} found.`
-          : cardOnly ? "Only an insurance ID card was uploaded. A binder is needed."
-            : `No binder found (${forms.map((f) => (f || "unknown form").replace("_", " ")).join(", ")}). Please check it is enough.`,
+        full ? `${at(full)}${full.insurance_form.replace("_", " ")} found.`
+          : cardOnly ? `${at(ins)}Only an insurance ID card was uploaded. A binder is needed.`
+            : `${at(ins)}No binder found (${forms.map((f) => (f || "unknown form").replace("_", " ")).join(", ")}). Please check it is enough.`,
         insurance.map(where));
     }
+    const payee = ordered.find((d) => d.loss_payee && isNavitas(d.loss_payee)) || from((d) => d.loss_payee) || ins;
     add("insurance_loss_payee", `${exp.lienholder} is loss payee`,
-      ins.loss_payee && isNavitas(ins.loss_payee) ? "pass" : "fail",
-      `Loss payee: ${ins.loss_payee || "not shown"}.`, [where(ins)]);
-    if (ins.comprehensive_and_collision === false) {
-      add("insurance_comp_collision", "Comprehensive and collision coverage", "fail", "Not shown on the certificate.", [where(ins)]);
-    } else if (exp.insuranceRequired && ins.comprehensive_and_collision !== true) {
+      payee.loss_payee && isNavitas(payee.loss_payee) ? "pass" : "fail",
+      `${at(payee)}Loss payee: ${payee.loss_payee || "not shown"}.`, [where(payee)]);
+    // 2026-10 (Titling testing 30 Oct) Navitas's address in the loss payee / certificate holder box, as on titles.
+    const payeeAddress = payee.loss_payee && isNavitas(payee.loss_payee) ? payee.loss_payee_address : null;
+    if (payeeAddress && /\d/.test(payeeAddress) && !navitasAddressOk(payeeAddress)) {
+      add("insurance_payee_address", `${exp.lienholder}'s address on the certificate is correct`, "warn",
+        `${at(payee)}Written: ${payeeAddress}. Expected 201 Executive Center Dr, Suite 100, Columbia, SC 29210.`, [where(payee)]);
+    }
+    const compDoc = ordered.find((d) => d.comprehensive_and_collision === true);
+    const noComp = ordered.find((d) => d.comprehensive_and_collision === false);
+    if (!compDoc && noComp) {
+      add("insurance_comp_collision", "Comprehensive and collision coverage", "fail", `${at(noComp)}Not shown on the certificate.`, insurance.map(where));
+    } else if (exp.insuranceRequired && !compDoc) {
       // 2026-10 (Titling answers 28 Oct) Required in insurance states; coverage the reader could not see is a look, not a failure.
       add("insurance_comp_collision", "Comprehensive and collision coverage", "warn",
-        "Could not confirm comprehensive and collision coverage. Please check.", [where(ins)]);
+        `${at(ins)}Could not confirm comprehensive and collision coverage. Please check.`, insurance.map(where));
+    }
+    // 2026-10 (Titling testing 30 Oct) An expired policy (40444256).
+    const expDoc = from((d) => d.policy_expiration);
+    if (expDoc && days(today, expDoc.policy_expiration) < 0) {
+      add("insurance_current", "Insurance policy is current", "fail",
+        `${at(expDoc)}Policy expired ${expDoc.policy_expiration}.`, [where(expDoc)]);
+    }
+    // 2026-10 (Titling testing 30 Oct) The insured is our customer, at the address on the other documents.
+    const customer = exp.customerName || (efa && efa.customer_legal_name);
+    const insuredDoc = from((d) => d.insured_name);
+    if (customer && insuredDoc && !sameName(nameOnly(insuredDoc.insured_name) || insuredDoc.insured_name, customer)) {
+      add("insurance_insured", "The insured is our customer", "warn",
+        `${at(insuredDoc)}Insured: ${insuredDoc.insured_name}; customer: ${customer}.`, [where(insuredDoc)]);
+    }
+    const insuredAddr = from((d) => d.insured_address);
+    if (insuredAddr && efa && (efa.customer_street || efa.customer_zip)) {
+      const zipOf = (x) => (String(x || "").match(/\b\d{5}\b(?!.*\b\d{5}\b)/) || [""])[0];
+      const numberOf = (x) => (String(x || "").match(/^\s*(\d+)/) || ["", ""])[1];
+      const efaAddr = [efa.customer_street, efa.customer_city, efa.customer_state, efa.customer_zip].filter(Boolean).join(", ");
+      const zipDiff = efa.customer_zip && zipOf(insuredAddr.insured_address) && zipOf(insuredAddr.insured_address) !== digits(efa.customer_zip).slice(0, 5);
+      const numDiff = numberOf(efa.customer_street) && numberOf(insuredAddr.insured_address) && numberOf(efa.customer_street) !== numberOf(insuredAddr.insured_address);
+      if (zipDiff || numDiff) {
+        add("insurance_insured_address", "The insured's address matches the EFA", "warn",
+          `${at(insuredAddr)}Insured at ${insuredAddr.insured_address}; the EFA shows ${efaAddr}.`, [where(insuredAddr), where(efa)]);
+      }
     }
     const cost = exp.cost || (efa && efa.amount_financed);
-    if (cost && ins.property_limit != null) {
+    const limitDoc = from((d) => d.property_limit);
+    if (cost && limitDoc) {
       // 1% allowance: certificates round the stated amount (e.g. $15,243 for a $15,243.75 cost).
-      add("insurance_limit", "Property coverage at least the equipment cost", ins.property_limit >= cost * 0.99 ? "pass" : "fail",
-        `Coverage $${ins.property_limit.toLocaleString()} vs cost $${Number(cost).toLocaleString()}.`, [where(ins)]);
+      add("insurance_limit", "Property coverage at least the equipment cost", limitDoc.property_limit >= cost * 0.99 ? "pass" : "fail",
+        `${at(limitDoc)}Coverage $${limitDoc.property_limit.toLocaleString()} vs cost $${Number(cost).toLocaleString()}.`, [where(limitDoc)]);
     }
     // A limit the certificate does not show (null or 0) is not checked; one that is shown must meet the minimum.
-    const occ = ins.liability_each_occurrence || null;
-    const agg = ins.liability_aggregate || null;
+    const liabDoc = ordered.find((d) => d.liability_each_occurrence || d.liability_aggregate) || ins;
+    const occ = liabDoc.liability_each_occurrence || null;
+    const agg = liabDoc.liability_aggregate || null;
     if (occ || agg) {
       const ok = (!occ || occ >= 300000) && (!agg || agg >= 600000);
       add("insurance_liability", "Liability at least $300,000 / $600,000", ok ? "pass" : "fail",
-        [occ ? `Each occurrence $${occ.toLocaleString()}` : "Each occurrence not shown",
+        at(liabDoc) + [occ ? `Each occurrence $${occ.toLocaleString()}` : "Each occurrence not shown",
           agg ? `aggregate $${agg.toLocaleString()}` : "aggregate not shown"].join(", ") + ".",
-        [where(ins)]);
+        [where(liabDoc)]);
     }
-    if (ins.additional_insured && isNavitas(ins.additional_insured)) {
+    const addl = ordered.find((d) => d.additional_insured && isNavitas(d.additional_insured));
+    if (addl) {
       add("insurance_not_additional_insured", `${exp.lienholder} is not listed as additional insured`, "fail",
-        "Navitas is listed as additional insured.", [where(ins)]);
+        `${at(addl)}Navitas is listed as additional insured.`, [where(addl)]);
     }
   } else if (exp.insuranceRequired && !exp.docType) {
     add("insurance_present", "Proof of insurance (required in this state)", "fail", "No insurance document found.");
